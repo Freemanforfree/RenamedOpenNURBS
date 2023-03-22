@@ -1,0 +1,1011 @@
+//
+// Copyright (c) 1993-2022 Robert McNeel & Associates. All rights reserved.
+// OpenNURBS, Rhinoceros, and Rhino3D are registered trademarks of Robert
+// McNeel & Associates.
+//
+// THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT EXPRESS OR IMPLIED WARRANTY.
+// ALL IMPLIED WARRANTIES OF FITNESS FOR ANY PARTICULAR PURPOSE AND OF
+// MERCHANTABILITY ARE HEREBY DISCLAIMED.
+//				
+// For complete openNURBS copyright information see <http://www.opennurbs.org>.
+//
+////////////////////////////////////////////////////////////////
+
+#if !defined(OPENNURBS_EXTRUSION_INC_)
+#define OPENNURBS_EXTRUSION_INC_
+
+/*
+Description:
+  Get the transformation that maps the MYON_Extrusion 
+  2d xy profile to 3d world space.
+Parameters:
+  P - [in] start or end of path
+  T - [in] unit tangent to path
+  U - [in] unit up vector perpendicular to T
+  Normal - [in] optional unit vector with Normal->z > 0 that
+     defines the unit normal to the miter plane.
+  xform - [out]
+    transformation that maps the profile curve to 3d world space
+  scale2d - [out]
+    If not nullptr, this is the scale part of the transformation.
+    If there is no mitering, then this is the identity.
+  rot2d - [out]
+    If not null, this is the part of the transformation
+    that rotates the xy plane into its 3d world location.
+Returns:
+  true if successful.
+*/
+MYON_DECL
+bool MYON_GetEndCapTransformation(
+          MYON_3dPoint P, 
+          MYON_3dVector T, 
+          MYON_3dVector U, 
+          const MYON_3dVector* Normal,
+          MYON_Xform& xform, // = rot3d*scale2d
+          MYON_Xform* scale2d,
+          MYON_Xform* rot2d
+          );
+
+class MYON_CLASS MYON_Extrusion : public MYON_Surface
+{
+  MYON_OBJECT_DECLARE(MYON_Extrusion);
+public:
+  MYON_Extrusion();
+  MYON_Extrusion(const MYON_Extrusion& src);
+  ~MYON_Extrusion();
+
+  MYON_Extrusion& operator=(const MYON_Extrusion&);
+
+  ////////////////////////////////////////////////////////////
+  //
+  // overrides of virtual MYON_Object functions
+  // 
+  void DestroyRuntimeCache( bool bDelete = true ) override;
+
+  bool IsValid( class MYON_TextLog* text_log = nullptr ) const override;
+  void Dump( MYON_TextLog& ) const override;
+  unsigned int SizeOf() const override;
+  MYON__UINT32 DataCRC( MYON__UINT32 current_remainder ) const override;
+  bool Write( MYON_BinaryArchive& binary_archive) const override;
+  bool Read( MYON_BinaryArchive& binary_archive ) override;
+  MYON::object_type ObjectType() const override;
+
+  ////////////////////////////////////////////////////////////
+  //
+  // overrides of virtual MYON_Geometry functions
+  // 
+  int Dimension() const override;
+  
+  // virtual MYON_Geometry GetBBox override		
+  bool GetBBox( double* boxmin, double* boxmax, bool bGrowBox = false ) const override;
+
+  // virtual MYON_Geometry GetTightBoundingBox override		
+  bool GetTightBoundingBox( class MYON_BoundingBox& tight_bbox, bool bGrowBox = false, const class MYON_Xform* xform = nullptr ) const override;
+
+  bool Transform( 
+        const MYON_Xform& xform
+        ) override;
+
+  /*
+  Description:
+    Build a brep form of the extrusion.  The outer profile is always 
+    the first face in the brep.  If there are inner profiles, 
+    additional brep faces are created for each profile.  If the
+    outer profile is closed, then end caps are added as the last
+    two faces in the brep.
+  Parameters:
+    brep - [in]
+      If the brep pointer is not null, then the brep form is constructed
+      in brep.  If the brep pointer is null, then an MYON_Brep is allocated
+      on the heap.
+  Returns:
+    If successful, a pointer to the brep form.  If unsuccessful, null.
+  */
+  MYON_Brep* BrepForm(
+        MYON_Brep* brep = nullptr 
+        ) const override;
+
+  /*
+  Description:
+    Build a brep form of the extrusion.  The outer profile is always 
+    the first face in the brep.  If there are inner profiles, 
+    additional brep faces are created for each profile.  If the
+    outer profile is closed, then end caps are added as the last
+    two faces in the brep.
+  Parameters:
+    brep - [in]
+      If the brep pointer is not null, then the brep form is constructed
+      in brep.  If the brep pointer is null, then an MYON_Brep is allocated
+      on the heap.
+    bSmoothFaces - [in]
+      If true and the profiles have kinks, then the faces corresponding
+      to those profiles are split so they will be G1.
+  Returns:
+    If successful, a pointer to the brep form.  If unsuccessful, null.
+  */
+  MYON_Brep* BrepForm(
+    MYON_Brep* brep,
+    bool bSmoothFaces 
+    ) const;
+
+  /*
+  Description:
+    Build a sum surface form of the extrusion.
+  Parameters:
+    sum_surface - [in]
+      If the sum_surface pointer is not null, then the sum surface 
+      form is constructed in sum_surface.  If the sum_surface pointer 
+      is null, then an MYON_SumSurface is allocated on the heap.
+  Returns:
+    If successful, a pointer to the sum surface form.
+    If unsuccessful, null. In particular, extrusions with
+    mitered ends do not have sum surface forms.
+  */
+  MYON_SumSurface* SumSurfaceForm( 
+    MYON_SumSurface* sum_surface 
+    ) const;
+
+  /*
+  Description:
+    Convert a component index that identifies a part of this extrusion
+    to a component index that identifies a part of the brep created
+    by BrepForm(...,false).
+  Parameters:
+    extrusion_ci - [in]
+    extrusion_profile_parameter - [in]
+    brep_form - [in]
+      brep created by MYON_Extrusion::BrepForm()
+    bSmoothFaces - [in]
+      If true and the profiles have kinks, then the faces corresponding
+      to those profiles are split so they will be G1.
+    brep_ci - [out]
+    profile_subdomain - [out]
+      The subdomain of the profile that contributes to the brep form component index
+  Returns:
+    True if successful.  False if input is not valid, in which case brep_ci
+    is set by calling MYON_COMPONENT_INDEX::UnSet().
+  Remarks:
+    If the wall surfaces have creases, then this function cannot
+    be used to identify brep components created by BrepForm(...,true).
+  */
+  bool GetBrepFormComponentIndex(
+    MYON_COMPONENT_INDEX extrusion_ci,
+    MYON_COMPONENT_INDEX& brep_ci
+    ) const;
+
+  bool GetBrepFormComponentIndex(
+    MYON_COMPONENT_INDEX extrusion_ci,
+    double extrusion_profile_parameter,
+    const MYON_Brep& brep_form,
+    MYON_COMPONENT_INDEX& brep_ci
+    ) const;
+
+  bool GetBrepFormComponentIndex(
+    MYON_COMPONENT_INDEX extrusion_ci,
+    double extrusion_profile_parameter,
+    const MYON_Brep* brep_form,
+    MYON_COMPONENT_INDEX& brep_ci
+    ) const;
+
+  bool GetBrepFormComponentIndex(
+    MYON_COMPONENT_INDEX extrusion_ci,
+    double extrusion_profile_parameter,
+    const MYON_Brep* brep_form,
+    bool bSmoothFaces,
+    MYON_COMPONENT_INDEX& brep_ci,
+    MYON_Interval* profile_subdomain
+  ) const;
+
+  ////////////////////////////////////////////////////////////
+  //
+  // overrides of virtual MYON_Surface functions
+  // 
+
+  bool SetDomain( 
+        int dir,
+        double t0, 
+        double t1
+        ) override;
+  MYON_Interval Domain(
+        int dir
+        ) const override;
+  bool GetSurfaceSize( 
+        double* width, 
+        double* height 
+        ) const override;
+  int SpanCount(
+        int dir
+        ) const override;
+  bool GetSpanVector(
+        int dir,
+        double* span_vector
+        ) const override;
+  bool GetSpanVectorIndex(
+        int dir,
+        double t,
+        int side,
+        int* span_vector_index,
+        MYON_Interval* span_interval
+        ) const override;
+  int Degree(
+        int dir
+        ) const override;
+  bool GetParameterTolerance(
+         int dir,
+         double t,
+         double* tminus,
+         double* tplus
+         ) const override;
+  ISO IsIsoparametric(
+        const MYON_Curve& curve,
+        const MYON_Interval* curve_domain = nullptr
+        ) const override;
+  bool IsPlanar(
+        MYON_Plane* plane = nullptr,
+        double tolerance = MYON_ZERO_TOLERANCE
+        ) const override;
+  bool IsClosed(
+        int
+        ) const override;
+  bool IsPeriodic(
+        int
+        ) const override;
+  bool GetNextDiscontinuity( 
+                  int dir,
+                  MYON::continuity c,
+                  double t0,
+                  double t1,
+                  double* t,
+                  int* hint=nullptr,
+                  int* dtype=nullptr,
+                  double cos_angle_tolerance=MYON_DEFAULT_ANGLE_TOLERANCE_COSINE,
+                  double curvature_tolerance=MYON_SQRT_EPSILON
+                  ) const override;
+  bool IsContinuous(
+    MYON::continuity c,
+    double s, 
+    double t, 
+    int* hint = nullptr,
+    double point_tolerance=MYON_ZERO_TOLERANCE,
+    double d1_tolerance=MYON_ZERO_TOLERANCE,
+    double d2_tolerance=MYON_ZERO_TOLERANCE,
+    double cos_angle_tolerance=MYON_DEFAULT_ANGLE_TOLERANCE_COSINE,
+    double curvature_tolerance=MYON_SQRT_EPSILON
+    ) const override;
+  ISO IsIsoparametric(
+        const MYON_BoundingBox& bbox
+        ) const override;
+  bool Reverse( int dir ) override;
+  bool Transpose() override;
+  bool Evaluate(
+         double u, double v,
+         int num_der,
+         int array_stride,
+         double* der_array,
+         int quadrant = 0,
+         int* hint = 0
+         ) const override;
+  MYON_Curve* IsoCurve(
+         int dir,
+         double c
+         ) const override;
+
+
+  bool Trim(
+         int dir,
+         const MYON_Interval& domain
+         ) override;
+  bool Extend(
+    int dir,
+    const MYON_Interval& domain
+    ) override;
+  bool Split(
+         int dir,
+         double c,
+         MYON_Surface*& west_or_south_side,
+         MYON_Surface*& east_or_north_side
+         ) const override;
+
+
+  //MYON_Surface* Offset(
+  //      double offset_distance, 
+  //      double tolerance, 
+  //      double* max_deviation = nullptr
+  //      ) const;
+
+  int GetNurbForm(
+        MYON_NurbsSurface& nurbs_surface,
+        double tolerance = 0.0
+        ) const override;
+  int HasNurbForm() const override;
+  bool GetSurfaceParameterFromNurbFormParameter(
+        double nurbs_s, double nurbs_t,
+        double* surface_s, double* surface_t
+        ) const override;
+  bool GetNurbFormParameterFromSurfaceParameter(
+        double surface_s, double surface_t,
+        double* nurbs_s,  double* nurbs_t
+        ) const override;
+
+
+  ////////////////////////////////////////////////////////////
+  //
+  // MYON_Extrusion mesh interface
+  // 
+
+  /*
+  Description:
+    Attach a mesh to the MYON_Extrusion.
+  Parameters:
+    mt - [in]
+      type of mesh that is being attached.
+      If mt is MYON::render_mesh, MYON::analysis_mesh or MYON::preview_mesh,
+      the mesh is attached as that type of mesh.
+      If mt is MYON::default_mesh or MYON::any_mesh, then 
+      nothing is done and false is returned.
+    mesh - [in]
+      * mesh to attach.  
+      * mesh must be on the heap because ~MYON_Extrusion() 
+        will delete it.
+      * if there is already of mesh of the prescribed type,
+        it will be deleted.
+      * if mesh is null, any existing mesh is deleted and
+        nothing is attached.
+  Remarks:
+    DEPRECATED. Use MYON_Extrusion.m_mesh_cache to managed cached meshes.
+  */
+  MYON_DEPRECATED_MSG("Use MYON_Extrusion.m_mesh_cache to managed cached meshes")
+  bool SetMesh( MYON::mesh_type mt, MYON_Mesh* mesh );
+
+  /*
+  Description:
+    Get a mesh attached to the MYON_Extrusion.
+  Parameters:
+    mt - [in]
+      type of mesh to get.
+      MYON::render_mesh, MYON::analysis_mesh and MYON::preview_mesh 
+      remove the meshes of those types.
+      If mt is MYON::default_mesh or MYON::any_mesh, then 
+      the first non null mesh is returned.
+  Returns:
+    A pointer to a mesh on the MYON_Extusion object.  
+    This mesh will be deleted by ~MYON_Extrusion().
+    If a mesh of the requested type is not available,
+    then null is returned.
+  Remarks:
+    DEPRECATED. Use MYON_Extrusion.m_mesh_cache to managed cached meshes.
+  */
+  MYON_DEPRECATED_MSG("Use MYON_Extrusion.m_mesh_cache to managed cached meshes")
+  const MYON_Mesh* Mesh( MYON::mesh_type mt ) const;
+
+  /*
+  Description:
+    Destroy a mesh attached to the MYON_Extrusion.
+  Parameters:
+    mt - [in] type of mesh to destroy
+      If mt is MYON::default_mesh or MYON::any_mesh, then 
+      all attached meshes of all types are destroyed.
+    bDeleteMesh - [in] if true, cached mesh is deleted.
+      If false, pointer to cached mesh is just set to null.
+  Remarks:
+    DEPRECATED. Use MYON_Extrusion.m_mesh_cache to managed cached meshes.
+  */
+  MYON_DEPRECATED_MSG("Use MYON_Extrusion.m_mesh_cache to managed cached meshes")
+  void DestroyMesh( MYON::mesh_type mt );
+
+  ////////////////////////////////////////////////////////////
+  //
+  // MYON_Extrusion interface
+  // 
+  void Destroy();
+
+  /*
+  Description:
+    Sets m_path to (A,B), m_path_domain to [0,Length(AB)],
+    and m_t to [0,1].
+  Parameters:
+    A - [in] path start
+    B - [in] path end
+  Returns:
+    true  A and B are valid, the distance from A to B is larger
+          than MYON_ZERO_TOLERANCE, and the path was set.
+    false A or B is not valid or the distance from A to B is
+          at most MYON_ZERO_TOLERANCE. In this case nothing is set.
+  Remark:
+    You must also set the up direction to be perpendicular to the path.
+  */
+  bool SetPath(MYON_3dPoint A, MYON_3dPoint B);
+
+  /*
+  Description:
+    Sets m_path to (A,B), m_path_domain to [0,Length(AB)],
+    m_t to [0,1], and m_up.
+  Parameters:
+    A - [in] path start
+    B - [in] path end
+    up - [in] up direction
+      If up is a unit vector and perpendicular to the line 
+      segment from A to B, then m_up is set to up.
+      Otherwise up will be adjusted so it is perpendicular
+      to the line segment from A to B and unitized.
+  Returns:
+    true  A and B are valid, the distance from A to B is larger
+          than MYON_ZERO_TOLERANCE, and the path was set.
+    false A or B is not valid, or the distance from A to B is
+          at most MYON_ZERO_TOLERANCE, or up is invalid, or up
+          is zero, or up is parallel to the line segment.
+          In this case nothing is set.
+  */
+  bool SetPathAndUp(MYON_3dPoint A, MYON_3dPoint B, MYON_3dVector up );
+
+  /*
+  Description:
+    Get the surface parameter for the path.
+  Returns:
+    0: The first surface parameter corresponds to the path direction.
+       (m_bTransposed = true)
+    1: The second surface parameter corresponds to the path direction.
+       (m_bTransposed = false)
+  Remarks:
+    The default MYON_Extrusion constructor sets 
+    m_bTransposed = false which corresponds to the 1 = PathParameter().
+  */
+  int PathParameter() const;
+
+  MYON_3dPoint PathStart() const;
+  MYON_3dPoint PathEnd() const;
+  MYON_3dVector PathTangent() const;
+
+  /*
+  Description:
+    Set miter plane normal.
+  Parameters:
+    N - [in] If N = MYON_3dVector::UnsetVector or N is parallel to the z-axis,
+             then the miter plane is the default plane 
+             perpendicular to the path.
+             If N is valid and the z coordinate of a unitized
+             N is greater than m_Nz_tol, then the miter plane 
+             normal is set.
+    end - [in] 0 = set miter plane at the start of the path.
+               1 = set miter plane at the end of the path.
+  */
+  bool SetMiterPlaneNormal(MYON_3dVector N, int end);
+
+  void GetMiterPlaneNormal(int end, MYON_3dVector& N) const;
+
+  /*
+  Returns:
+    0: not mitered.
+    1: start of path is mitered.
+    2: end of path is mitered.
+    3: start and end are mitered.
+  */
+  int IsMitered() const;
+
+  /*
+  Returns:
+    True if extrusion object is a capped solid.
+  */
+  bool IsSolid() const;
+
+  /*
+  Returns:
+    0: no or profile is open
+    1: bottom cap
+    2: top cap
+    3: both ends capped.
+  */
+  int IsCapped() const;
+
+  /*
+  Returns:
+    0: no caps
+    1: exrusion has either a top cap or a bottom cap
+    2: both ends are capped.
+  See Also:
+    MYON_Extrusion::ProfileCount()
+    MYON_Extrusion::ProfileSmoothSegmentCount()
+  */
+  int CapCount() const;
+
+  /*
+  Description:
+    Deprecated function.
+
+    Use CapCount() to determine how many end caps there are.
+    Use ProfileCount() to determine how many profiles there are.
+    Use ProfileSmoothSegmentCount() to determine how many 
+    smooth subsegments are in a profile. Each smooth subsegment
+    becomes a wall face in the brep form.
+
+  Returns:
+    Number of "faces" the extrusion has.
+    0: extrusion is not valid
+    1: extrusion is not capped
+    2: extrusion has a closed outer profile and one cap
+    3: extrusion has a closed outer profile and two caps
+
+  Remarks:
+    This function was written before extrusions supported "holes"
+    and before the brep form was divided at profile creases.
+    At this point it simply leads to confusion. See the Description
+    function replacements.
+  */
+  MYON_DEPRECATED_MSG("Use CapCount(), ProfileCount(), or ProfileSmoothSegmentCount()")
+  int FaceCount() const;
+
+  /*
+  Description:
+    Get the transformation that maps the xy profile curve
+    to its 3d location.
+  Parameters:
+    s - [in] 0.0 = starting profile
+             1.0 = ending profile
+  */
+  bool GetProfileTransformation( double s, MYON_Xform& xform ) const;
+
+  /*
+  Description:
+    Get the the 3d plane containing the profile curve at a
+    normalized path parameter.
+  Parameters:
+    s - [in] 0.0 = starting plane
+             1.0 = ending plane
+    plane - [out]
+      Plane containing profile is returned in plane.  If
+      false is returned, then the input value of plane
+      is not changed.
+  Returns:
+    true if plane was set.  False if this is invalid and plane
+    could not be set.
+  Remarks:
+    When no mitering is happening, GetPathPlane() and
+    GetProfilePlane() return the same plane.
+  */
+  bool GetProfilePlane( double s, MYON_Plane& plane ) const;
+
+
+  /*
+  Description:
+    Get the the 3d plane perpendicular to the path at a
+    normalized path parameter.
+  Parameters:
+    s - [in] 0.0 = starting plane
+             1.0 = ending plane
+    plane - [out]
+      Plane is returned here.  If
+      false is returned, then the input value of plane
+      is not changed.
+  Returns:
+    true if plane was set.  False if this is invalid and plane
+    could not be set.
+  Remarks:
+    When no mitering is happening, GetPathPlane() and
+    GetProfilePlane() return the same plane.
+  */
+  bool GetPathPlane( double s, MYON_Plane& plane ) const;
+
+  /*
+  Description:
+    Set the outer profile of the extrusion.
+  Parameters:
+    outer_profile - [in] 
+      curve in the xy plane or a 2d curve.
+    bCap - [in]
+      If outer_profile is a closed curve, then bCap
+      determines if the extrusion has end caps.
+      If outer_profile is an open curve, bCap is ignored.
+  Returns:
+    True if the profile was set. In this case the MYON_Extrusion class
+    manages the curve and ~MYON_Extrusion will delete it.  If the outer
+    profile is closed, then the extrusion may also have inner profiles.
+    If the outer profile is open, the extrusion may not have inner
+    profiles. If the extrusion already has a profile, the set will
+    fail.
+  Remarks:
+    If needed, outer_profile will be converted to a 2d
+    curve. If outer_curve is closed but not correctly oriented,
+    it will reversed so it has a counter-clockwise orientation.
+  */
+  bool SetOuterProfile( MYON_Curve* outer_profile, bool bCap );
+
+  /*
+  Description:
+    Add an inner profile.
+  Parameters:
+    inner_profile - [in]
+      closed curve in the xy plane or a 2d curve.
+  Returns:
+    True if the profile was set. In this case the 
+    MYON_Extrusion class  manages the curve and ~MYON_Extrusion will 
+    delete it. The extrusion must already have an outer profile.
+    If the extrusion already has a profile, the set will
+    fail.
+  Remarks:
+    If needed, innter_profile will be converted to a 2d
+    curve. If inner_profile is not correctly oriented, it
+    will be reversed so it has a clockwise orientation.
+  */
+  bool AddInnerProfile( MYON_Curve* inner_profile );
+
+  /*
+  Returns:
+    Number of profile curves.
+  See Also:
+    MYON_Extrusion::CapCount()
+    MYON_Extrusion::ProfileSmoothSegmentCount()
+  */
+  int ProfileCount() const;
+
+  /*
+  Parameter:
+    profile_index - [in]
+      0 <= profile_index < ProfileCount().
+      The outer profile has index 0.
+  Returns:
+    Number of smooth segments in the profile curve.
+  See Also:
+    MYON_Extrusion::CapCount()
+    MYON_Extrusion::GetProfileKinkParameters()
+    MYON_Extrusion::ProfileCount()
+  */
+  int ProfileSmoothSegmentCount( int profile_index ) const;
+
+  /*
+  Description:
+    Get the surface parameter for the profile.
+  Returns:
+    0: The first surface parameter corresponds to the profile direction.
+       (m_bTransposed = false)
+    1: The second surface parameter corresponds to the profile direction.
+       (m_bTransposed = true)
+  Remarks:
+    The default MYON_Extrusion constructor sets 
+    m_bTransposed = false which corresponds to the 0 = ProfileParameter().
+  */
+  int ProfileParameter() const;
+
+  /*
+  Parameters:
+    profile_index - [in]
+      0 <= profile_index < ProfileCount().
+      The outer profile has index 0.
+  Returns:
+    Pointer to the i-th 2d profile.  The MYON_Extrusion
+    class manages this curve.  Do not delete it
+    and do not use the pointer if the MYON_Extrusion
+    class changes.
+  */
+  const MYON_Curve* Profile(int profile_index) const;
+
+  /*
+  Parameters:
+    profile_index - [in]
+      0 <= profile_index < ProfileCount().
+      The outer profile has index 0.
+    s - [in] ( 0.0 <= s <= 1.0 )
+      A relative parameter controlling which priofile
+      is returned. s = 0.0 returns the bottom profile
+      and s = 1.0 returns the top profile.
+  Returns:
+    nullptr if the input parameters or the MYON_Extrusion class is
+    not valid.  Otherwise a pointer to a 3d curve for 
+    the requested profile. This curve is on the heap and
+    the caller is responsible for deleting this curve.
+  */
+  MYON_Curve* Profile3d(int profile_index, double s ) const;
+
+  /*
+  Parameters:
+    ci - [in]
+      component index identifying a 3d extrusion profile curve.
+  Returns:
+    nullptr if the component index or the MYON_Extrusion class is
+    not valid.  Otherwise a pointer to a 3d curve for 
+    the requested profile. This curve is on the heap and
+    the caller is responsible for deleting this curve.
+  */
+  MYON_Curve* Profile3d( MYON_COMPONENT_INDEX ci ) const;
+
+  /*
+  Parameters:
+    ci - [in]
+      component index identifying a wall edge curve.
+  Returns:
+    nullptr if the component index or the MYON_Extrusion class is
+    not valid.  Otherwise a pointer to a 3d curve for 
+    the requested wall edge. This curve is on the heap and
+    the caller is responsible for deleting this curve.
+  */
+  MYON_Curve* WallEdge( MYON_COMPONENT_INDEX ci ) const;
+
+  /*
+  Parameters:
+    ci - [in]
+      component index identifying a wall surface.
+  Returns:
+    nullptr if the component index or the MYON_Extrusion class is
+    not valid.  Otherwise a pointer to a surface for 
+    the requested wall surface. This curve is on the heap and
+    the caller is responsible for deleting this curve.
+  */
+  MYON_Surface* WallSurface( MYON_COMPONENT_INDEX ci ) const;
+
+  /*
+  Parameters:
+    line_curve - [in]
+      If null, a line curve will be allocated using new.
+  Returns:
+    Null if the extrusion path is not valid.  Otherwise
+    a pointer to an MYON_LineCurve that is set to the 
+    extrusion's path. The caller must delete this curve.
+  */
+  MYON_LineCurve* PathLineCurve(MYON_LineCurve* line_curve) const;
+
+  /*
+  Parameters:
+    profile_parameter - [in]
+      parameter on profile curve
+  Returns:
+      -1: if the profile_parameter does not correspond 
+          to a point on the profile curve.
+    >= 0: index of the profile curve with domain containing
+          this parameter.  When the profile_parameter corresponds
+          to the end of one profile and the beginning of the next
+          profile, the index of the next profile is returned.
+  */
+  int ProfileIndex( double profile_parameter ) const;
+
+
+  /*
+  Returns:
+    If m_profile_count >= 2 and m_profile is an MYON_PolyCurve
+    with m_profile_count segments defining outer and inner
+    profiles, a pointer to the polycurve is returned.
+    Otherwise null is returned.
+  */
+  const MYON_PolyCurve* PolyProfile() const;
+
+  /*
+  Description:
+    Get a list of the 2d profile curves.
+  Returns:
+    Number of curves appended to the list.
+  */
+  int GetProfileCurves( MYON_SimpleArray<const MYON_Curve*>& profile_curves ) const;
+
+
+  /*
+  Description:
+    Get the parameters where a profile curve has kinks.
+  Parameters:
+    profile_index - [in]
+    profile_kink_parameters - [out]
+      parameters at internal kinks are appended to this array.
+  Returns:
+    Number of parameters appended to profile_kink_parameters[]
+  Remarks:
+    This function is used when making the brep form that has
+    smooth faces.
+  */
+  int GetProfileKinkParameters( int profile_index, MYON_SimpleArray<double>& profile_kink_parameters ) const;
+  int GetProfileKinkParameters( int profile_index, MYON_SimpleArray<double>* profile_kink_parameters ) const;
+
+  /*
+  Parameters:
+    profile_index - [in]
+  Returns:
+    True if the profile has at least one kink.
+  */
+  bool ProfileIsKinked( int profile_index ) const;
+
+  /*
+  Description:
+    Test a polycurve to determine if it meets the necessary 
+    conditions to be used as a multi-segment profile in a extrusion.
+  Returns:
+    True if the returned polycurve can be used a a multi-segment 
+    profile in a extrusion.
+  */
+  static bool IsValidPolyCurveProfile( const MYON_PolyCurve& polycurve, MYON_TextLog* text_log = 0 );
+
+  /*
+  Description:
+    If possible, modify a polycurve so it meets the necessary conditions
+    to be used as a multi-segment profile in a extrusion.
+  Returns:
+    True if the returned polycurve can be used a a multi-segment 
+    profile in a extrusion.
+  */
+  static bool CleanupPolyCurveProfile( MYON_PolyCurve& polycurve );
+
+  // path definition:
+  //   The line m_path must have length > m_path_length_min.
+  //   The interval m_t must satisfy 0 <= m_t[0] < m_t[1] <= 1.
+  //   The extrusion starts at m_path.PointAt(m_t[0]) and ends
+  //   at m_path.PointAt(m_t[1]).
+  //   The "up" direction m_up is a unit vector that must
+  //   be perpendicular to m_path.Tangent().
+  MYON_Line m_path;
+  MYON_Interval m_t;
+  MYON_3dVector m_up;
+
+  // profile information:
+  //   In general, use SetOuterProfile() and AddInnerProfile()
+  //   to set m_profile_count and m_profile.  If you are
+  //   a glutton for punishment, then you might be interested
+  //   in the following.
+  //   The profile curves must be in the x-y plane.
+  //   The profile's "y" axis corresponds to m_up.
+  //   The point (0,0) is extruded along the m_path line.
+  //   If m_profile_count = 1, then m_profile can be any
+  //   type of continuous curve.  If m_profile_count > 1,
+  //   then m_profile must be an MYON_PolyCurve with
+  //   m_profile_count segments, the domain of each segment
+  //   must exactly match the polycurve's segment domain,
+  //   every segment must be continuous and closed,
+  //   the first segment curve must have counter-clockwise
+  //   orientation, and the rest must have clockwise 
+  //   orientations.
+  int m_profile_count;
+  MYON_Curve* m_profile;
+
+  // capped end information:
+  //   If the profile is closed, then m_bCap[] determines
+  //   if the ends are capped.
+  bool m_bCap[2];
+
+  // mitered end information:
+  //   The normals m_N[] are with respect to the xy plane.
+  //   A normal parallel to the z axis has no mitering.
+  //   If m_bHaveN[i] is true, then m_N[i] must be a 3d unit
+  //   vector with m_N[i].z > m_Nz_tol;  If m_bHaveN[i]
+  //   is false, then m_N[i] is ignored.  The normal m_N[0]
+  //   defines the start miter plane and m_N[1] defines the
+  //   end miter plane.
+  bool m_bHaveN[2];
+  MYON_3dVector m_N[2];
+
+  // Surface parameterization information
+  MYON_Interval m_path_domain;
+  bool m_bTransposed; // false: (s,t) = (profile,path)
+
+  // The z coordinates of miter plane normals must be
+  // greater than m_Nz_tol
+  static const double m_Nz_min; // 1/64;
+
+  // The length of the m_path line must be greater than
+  // m_path_length_min
+  static const double m_path_length_min; // MYON_ZERO_TOLERANCE;
+
+  // Cached meshes used for rendering, analysis, ...
+  mutable MYON_MeshCache m_mesh_cache = MYON_MeshCache::Empty;
+
+  /*
+  Description:
+    Get an MYON_Exrusion form of a cylinder.
+  Parameters:
+    cylinder - [in] cylinder.IsFinite() must be true
+    bCapBottom - [in] if true, the end at cylinder.m_height[0] will be capped
+    bCapTop - [in] if true, the end at cylinder.m_height[1] will be capped
+    extrusion - [in] 
+      If the input extrusion pointer is null, one will be allocated on the heap
+      and it is the caller's responsibility to delete it at an appropriate time.
+      If the input pointer is not null, this extrusion will be used and the same
+      pointer will be returned, provided the input is valid.
+  Returns:
+    If the input is valid, a pointer to an MYON_Exrusion form of the cylinder.
+    If the input is not valid, then null, even when the input extrusion
+    object is not null.
+  Example:
+
+          MYON_Cylinder cylinder = ...;
+          bool bCapBottom = true;
+          bool bCapTop = true;
+          MYON_Extrusion extrusion;
+          if ( 0 == MYON_Extrusion::Cylinder(cylinder,bCapBottom,bCapTop,&extrusion) )
+          {
+            // input is not valid - nothing set
+            ...
+          }
+          else
+          {
+            // extrusion = cylinder
+            ...
+          }
+  */
+  static MYON_Extrusion* Cylinder( 
+    const MYON_Cylinder& cylinder, 
+    bool bCapBottom,
+    bool bCapTop,
+    MYON_Extrusion* extrusion = 0 
+    );
+
+  /*
+  Description:
+    Get an MYON_Exrusion form of a pipe.
+  Parameters:
+    cylinder - [in] cylinder.IsFinite() must be true
+      The cylinder can be either the inner or outer wall of the pipe.
+    other_radius - [in] ( != cylinder.Radius() )
+      If cylinder.Radius() < other_radius, then the cylinder will be
+      the inside of the pipe.  If cylinder.Radius() > other_radius, then
+      the cylinder will be the outside of the pipe.
+    bCapBottom - [in] if true, the end at cylinder.m_height[0] will be capped
+    bCapTop - [in] if true, the end at cylinder.m_height[1] will be capped
+    extrusion - [in] 
+      If the input extrusion pointer is null, one will be allocated on the heap
+      and it is the caller's responsibility to delete it at an appropriate time.
+      If the input pointer is not null, this extrusion will be used and the same
+      pointer will be returned, provided the input is valid.
+  Returns:
+    If the input is valid, a pointer to an MYON_Exrusion form of the pipe.
+    If the input is not valid, then null, even when the input extrusion
+    object is not null.
+  Example:
+
+          MYON_Cylinder cylinder = ...;
+          double other_radius = cylinder.Radius()+1.0;
+          bool bCapBottom = true;
+          bool bCapTop = true;
+          MYON_Extrusion extrusion;
+          if ( 0 == MYON_Extrusion::Pipe(cylinder,other_radius,bCapBottom,bCapTop,&extrusion) )
+          {
+            // input is not valid - nothing set
+            ...
+          }
+          else
+          {
+            // extrusion = pipe
+            ...
+          }
+  */
+  static MYON_Extrusion* Pipe( 
+    const MYON_Cylinder& cylinder, 
+    double other_radius,
+    bool bCapBottom,
+    bool bCapTop,
+    MYON_Extrusion* extrusion = 0 
+    );
+
+  /*
+  Description:
+    Create an MYON_Exrusion from a 3d curve, a plane and a height.
+  Parameters:
+    curve - [in] 
+      A continuous 3d curve.
+    plane - [in]
+      If plane is null, then the plane returned by curve.IsPlanar() is used.
+      The 3d curve is projected to this plane and the result is passed to
+      MYON_Extrusion::SetOuterProfile().
+    height - [in]
+      If the height > 0, the bottom of the extrusion will be in plane and
+      the top will be height units above the plane.
+      If the height < 0, the top of the extrusion will be in plane and
+      the bottom will be height units below the plane.
+    bCap - [in]
+      If the curve is closed and bCap is true, then the resulting extrusion
+      is capped.
+    extrusion - [in] 
+      If the input extrusion pointer is null, one will be allocated on the heap
+      and it is the caller's responsibility to delete it at an appropriate time.
+      If the input pointer is not null, this extrusion will be used and the same
+      pointer will be returned, provided the input is valid.
+  Returns:
+    If the input is valid, a pointer to an MYON_Exrusion form of the pipe.
+    If the input is not valid, then null, even when the input extrusion
+    object is not null.
+  */
+  static MYON_Extrusion* CreateFrom3dCurve( 
+    const MYON_Curve& curve,
+    const MYON_Plane* plane,
+    double height,
+    bool bCap,
+    MYON_Extrusion* extrusion = 0 
+    );
+
+};
+
+
+#endif
+

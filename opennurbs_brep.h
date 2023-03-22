@@ -1,0 +1,4886 @@
+//
+// Copyright (c) 1993-2022 Robert McNeel & Associates. All rights reserved.
+// OpenNURBS, Rhinoceros, and Rhino3D are registered trademarks of Robert
+// McNeel & Associates.
+//
+// THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT EXPRESS OR IMPLIED WARRANTY.
+// ALL IMPLIED WARRANTIES OF FITNESS FOR ANY PARTICULAR PURPOSE AND OF
+// MERCHANTABILITY ARE HEREBY DISCLAIMED.
+//				
+// For complete openNURBS copyright information see <http://www.opennurbs.org>.
+//
+////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////////////////
+//
+//   Definition of b-rep and its parts
+//
+////////////////////////////////////////////////////////////////
+
+#if !defined(OPENNURBS_BREP_INC_)
+#define OPENNURBS_BREP_INC_
+
+class MYON_BrepTrim;
+class MYON_BrepEdge;
+class MYON_BrepLoop;
+class MYON_BrepFace;
+
+
+// TEMPORARY DEFINES SO I DON'T BREAK THE BUILD
+//#define m_vertex_user_i m_vertex_user.i
+//#define m_trim_user_i m_trim_user.i
+//#define m_edge_user_i m_edge_user.i
+//#define m_loop_user_i m_loop_user.i
+//#define m_face_user_i m_face_user.i
+
+// Description:
+//   Brep vertex information is stored in MYON_BrepVertex classes.
+//   MYON_Brep.m_V[] is an array of all the vertices in the brep.
+//
+//   If a vertex is a point on a face, then brep.m_E[m_ei]
+//   will be an edge with no 3d curve.  This edge will have
+//   a single trim with type MYON_BrepTrim::ptonsrf.  There
+//   will be a loop containing this single trim.
+//   Use MYON_Brep::NewPointOnFace() to create vertices that are
+//   points on faces. 
+class MYON_CLASS MYON_BrepVertex : public MYON_Point
+{
+  MYON_OBJECT_DECLARE(MYON_BrepVertex);
+
+public:
+  // Union available for application use.
+  // The constructor zeros m_vertex_user.
+  // The value is of m_vertex_user is not saved in 3DM
+  // archives and may be changed by some computations.
+  mutable MYON_U m_vertex_user; 
+
+public:
+  mutable MYON_ComponentStatus m_status = MYON_ComponentStatus::NoneSet;
+
+private:
+  MYON__UINT16 m_reserved1 = 0U;
+
+public:
+  // index of the vertex in the MYON_Brep.m_V[] array
+  int m_vertex_index = -1;
+
+  /////////////////////////////////////////////////////////////////
+  // Construction
+  //
+  // In general, you should not directly create MYON_BrepVertex classes.
+  // Use MYON_Brep::NewVertex instead.
+  MYON_BrepVertex();
+  MYON_BrepVertex(
+    int // vertex index
+    );
+  MYON_BrepVertex& operator=(const MYON_BrepVertex&);
+
+  // virtual MYON_Object::SizeOf override
+  unsigned int SizeOf() const override;
+
+  // virtual MYON_Object::DataCRC override
+  MYON__UINT32 DataCRC(MYON__UINT32 current_remainder) const override;
+
+  bool IsValid( class MYON_TextLog* text_log = nullptr ) const override;
+
+  // virtual MYON_Object::Dump() override
+  void Dump( MYON_TextLog& ) const override; // for debugging
+
+  // virtual MYON_Object::Write() override
+  bool Write( MYON_BinaryArchive& ) const override;
+
+  // virtual MYON_Object::Read() override
+  bool Read( MYON_BinaryArchive& ) override;
+
+  // virtual MYON_Geometry::ComponentIndex() override
+  MYON_COMPONENT_INDEX ComponentIndex() const override;
+
+  /////////////////////////////////////////////////////////////////
+  // Interface
+
+  // Description:
+  //   Set vertex location.
+  // Parameters:
+  //   point - [in] 3d vertex location
+  bool SetPoint( 
+          const MYON_3dPoint& // point
+          );
+
+  // Returns:
+  //   Vertex location.
+  MYON_3dPoint Point() const;
+
+  // Returns:
+  //   value of MYON_BrepVertex::m_tolerance
+  // Remarks:
+  //   Use MYON_Brep::SetVertexTolerance( MYON_BrepVertex& ) to set tolerances.
+  double Tolerance() const;
+
+  // Returns:
+  //   number of edges that begin or end at this vertex.
+  int EdgeCount() const;
+
+
+  /////////////////////////////////////////////////////////////////
+  // Implementation
+
+  // indices of edges starting/ending at this vertex
+  //
+  // For closed edges, edge.m_vi[0] = edge.m_vi[1] and 
+  // edge.m_edge_index appears twice in the m_ei[] array.
+  // The first occurrence of edge.m_edge_index in m_ei[]
+  // is for the closed edge starting the vertex.
+  // The second occurrence of edge,m_edge_index in m_ei[]
+  // is for the closed edge ending at the vertex.
+  // C.f. MYON_Brep::Next/PrevEdge().
+  MYON_SimpleArray<int> m_ei;
+
+  // accuracy of vertex point (>=0.0 or MYON_UNSET_VALUE)
+  //
+  // A value of MYON_UNSET_VALUE indicates that the
+  // tolerance should be computed.
+  //
+  // A value of 0.0 indicates that the distance
+  // from the vertex to any applicable edge or trim
+  // end is <=  MYON_ZERO_TOLERANCE
+  //
+  // If an edge begins or ends at this vertex,
+  // then the distance from the vertex's 
+  // 3d point to the appropriate end of the
+  // edge's 3d curve must be <= this tolerance.
+  //
+  // If a trim begins or ends at this vertex,
+  // then the distance from the vertex's 3d point
+  // to the 3d point on the surface obtained by
+  // evaluating the surface at the appropriate
+  // end of the trimming curve must be <= this
+  // tolerance.
+  double m_tolerance = MYON_UNSET_VALUE;
+
+private:
+  MYON_BrepVertex( const MYON_BrepVertex& ) = delete;
+};
+
+/*
+Description:
+  Brep edge information is stored in MYON_BrepEdge classes.
+  MYON_Brep.m_E[] is an array of all the edges in the brep.
+
+  An MYON_BrepEdge is derived from MYON_CurveProxy so the the
+  edge can supply easy to use evaluation tools via 
+  the MYON_Curve virtual member functions.
+
+  Note well that the domains and orientations of the curve
+  m_C3[edge.m_c3i] and the edge as a curve may not
+  agree.
+*/
+
+// April 24, 2017 Dale Lear
+// MYON_Curve::Trim(const MYON_Interval&) is a virtual function and MYON_BrepEdge derives 
+// from MYON_CurveProxy which derives from MYON_Curve. The MYON_Brep::Trim(int) function was 
+// added and mistakenly named "Trim". This all happened about twenty years ago.
+//
+// Both the virtual MYON_Curve::Trim(const MYON_Interval&) and MYON_BrepEdge::Trim(int) functions
+// are widely used. At some point the functionON_Brep::Trim() will be deprecated and the 4263
+// warning MYON_Brep::Trim(int) generates will be disabled for the definition of class MYON_BrepEdge.
+// In version 7, MYON_Brep::Trim(int) will be deleted and the warning will no longer be disabled.
+#pragma MYON_PRAGMA_WARNING_PUSH
+#pragma MYON_PRAGMA_WARNING_DISABLE_MSC(4263)
+#pragma MYON_PRAGMA_WARNING_DISABLE_MSC(4264)
+
+class MYON_CLASS MYON_BrepEdge : public  MYON_CurveProxy
+{
+  MYON_OBJECT_DECLARE(MYON_BrepEdge);
+
+public:
+
+  // Union available for application use.
+  // The constructor zeros m_edge_user.
+  // The value is of m_edge_user is not saved in 3DM
+  // archives and may be changed by some computations.
+  mutable MYON_U m_edge_user;
+
+public:
+  mutable MYON_ComponentStatus m_status = MYON_ComponentStatus::NoneSet;
+
+private:
+  MYON__UINT16 m_reserved1 = 0U;
+
+public:
+  // index of edge in MYON_Brep.m_E[] array
+  int m_edge_index = -1;    
+
+
+  // virtual MYON_Curve::IsClosed override
+  bool IsClosed() const override;
+
+  /////////////////////////////////////////////////////////////////
+  // Construction
+  //
+  // In general, you should not directly create MYON_BrepEdge classes.
+  // Use MYON_Brep::NewVertex instead.
+  MYON_BrepEdge();
+  MYON_BrepEdge(int); // edge index
+  MYON_BrepEdge& operator=(const MYON_BrepEdge&);
+
+  // virtual MYON_Object function
+  // The MYON_BrepEdge override returns MYON::curve_object.
+  MYON::object_type ObjectType() const override;
+
+  /*
+  Returns:
+    Brep this edge belongs to.
+  */
+  MYON_Brep* Brep() const;
+
+
+  /*
+  Parameters:
+    eti - [in] index into the edge's m_ti[] array.
+  Returns:
+    The trim brep.m_T[edge.m_ti[eti]];
+  Remarks:
+    This version of "Trim" hides the virtual function MYON_CurveProxy::Trim(const MYON_Interval&),
+    which is a good thing. Special care must be taken when changing the geometry
+    of a brep edge to insure vertex, trim, and edge information remains valid.
+  */
+  MYON_BrepTrim* Trim( int eti ) const;
+
+  /*
+  Returns:
+    Number of trims attached to this edge.
+  */
+  int TrimCount() const;
+
+  /*
+  Parameters:
+    evi - [in] 0 or 1
+  Returns:
+    Brep vertex at specified end of the edge.
+  */
+  MYON_BrepVertex* Vertex(int evi) const;
+
+  // virtual MYON_Object::SizeOf override
+  unsigned int SizeOf() const override;
+
+  // virtual MYON_Object::DataCRC override
+  MYON__UINT32 DataCRC(MYON__UINT32 current_remainder) const override;
+
+  bool IsValid( class MYON_TextLog* text_log = nullptr ) const override;
+
+  // virtual MYON_Object::Dump() override
+  void Dump( MYON_TextLog& ) const override; // for debugging
+
+  // virtual MYON_Object::Write() override
+  bool Write( MYON_BinaryArchive& ) const override;
+
+  // virtual MYON_Object::Read() override
+  bool Read( MYON_BinaryArchive& ) override;
+
+  // virtual MYON_Geometry::ComponentIndex() override
+  MYON_COMPONENT_INDEX ComponentIndex() const override;
+
+  // virtual MYON_Curve::Reverse override
+  bool Reverse() override;
+
+  /* Not necessary.  Base class does the right thing.  MYON_CurveProxy does not have an override.
+  // virtual MYON_Curve::SetStartPoint override
+  bool SetStartPoint(
+          MYON_3dPoint start_point
+          );
+
+  // virtual MYON_Curve::SetEndPoint override
+  bool SetEndPoint(
+          MYON_3dPoint end_point
+          );
+          */
+
+
+  /////////////////////////////////////////////////////////////////
+  // Implementation
+
+  /*
+  Returns:
+    brep.m_C3[] index of the 3d curve geometry used by this edge 
+    or -1.
+  */
+  int EdgeCurveIndexOf() const;
+
+  /*
+  Returns:
+    3d curve geometry used by this edge or nullptr.
+  */
+  const MYON_Curve* EdgeCurveOf() const;
+
+  /*
+  Description:
+    Expert user tool that replaces the 3d curve geometry
+    of an edge
+  Parameters;
+    c3i - [in] brep 3d curve index of new curve
+  Returns:
+    True if successful.
+  Example:
+
+            MYON_Curve* pCurve = ...;
+            int c3i = brep.AddEdgeCurve(pCurve);
+            edge.ChangeEdgeCurve(c3i);
+
+  Remarks:
+    Sets m_c3i, calls SetProxyCurve, cleans runtime caches.
+  */
+  bool ChangeEdgeCurve(
+    int c3i 
+    );
+
+  /*
+  Description:
+    When an edge is modified, the m_pline[].e values need
+    to be set to MYON_UNSET_VALUE by calling UnsetPlineEdgeParameters().
+  */
+  void UnsetPlineEdgeParameters();
+
+
+  // index of 3d curve in m_C3[] array
+  // (edge.m_curve also points to m_C3[m_c3i])
+  int m_c3i = -1;
+
+  // indices of starting/ending vertex
+  //
+  // For closed edges, m_vi[0] = m_vi[1] and m_edge_index
+  // appears twice in the m_V[m_vi[0]].m_ei[] array.
+  // The first occurrence of m_edge_index in m_V[m_vi[0]].m_ei[]
+  // is for the closed edge starting the vertex.  The second
+  // occurrence of m_edge_index in m_V[m_vi[0]].m_ei[]
+  // is for the closed edge edge ending at the vertex.
+  // C.f. MYON_Brep::Next/PrevEdge().
+  int m_vi[2];
+
+  // indices of Trims that use this edge
+  MYON_SimpleArray<int> m_ti;
+
+  // accuracy of edge curve (>=0.0 or MYON_UNSET_VALUE)
+  //
+  // A value of MYON_UNSET_VALUE indicates that the
+  // tolerance should be computed.
+  //
+  // The maximum distance from the edge's 3d curve
+  // to any surface of a face that has this edge as
+  // a portion of its boundary must be <= this
+  // tolerance.
+  double m_tolerance = MYON_UNSET_VALUE;
+
+private:
+  friend class MYON_Brep;
+  MYON_Brep* m_brep = nullptr; // so isolated edge class edge can get at it's 3d curve
+  MYON_BrepEdge( const MYON_BrepEdge& ) = delete;
+};
+
+#pragma MYON_PRAGMA_WARNING_POP
+
+struct MYON_BrepTrimPoint
+{
+  MYON_2dPoint p; // 2d surface parameter space point
+  double t;     // corresponding trim curve parameter
+  double e;     // corresponding edge curve parameter (MYON_UNSET_VALUE if unknown)
+};
+
+#if defined(MYON_DLL_TEMPLATE)
+MYON_DLL_TEMPLATE template class MYON_CLASS MYON_SimpleArray<MYON_BrepTrimPoint>;
+#endif
+
+
+/*
+Description:
+  Brep trim information is stored in MYON_BrepTrim classes.
+  MYON_Brep.m_T[] is an array of all the trim in the brep.
+
+  An MYON_BrepTrim is derived from MYON_CurveProxy so the the
+  trim can supply easy to use evaluation tools via 
+  the MYON_Curve virtual member functions.
+
+  Note well that the domains and orientations of the curve
+  m_C2[trim.m_c2i] and the trim as a curve may not
+  agree.
+*/
+class MYON_CLASS MYON_BrepTrim : public  MYON_CurveProxy
+{
+  MYON_OBJECT_DECLARE(MYON_BrepTrim);
+
+public:
+  void DestroyRuntimeCache( bool bDelete = true ) override;
+
+  // virtual MYON_Object::SizeOf override
+  unsigned int SizeOf() const override;
+
+  // Union available for application use.
+  // The constructor zeros m_trim_user.
+  // The value is of m_trim_user is not saved in 3DM
+  // archives and may be changed by some computations.
+  mutable MYON_U m_trim_user;
+
+public:
+  mutable MYON_ComponentStatus m_status = MYON_ComponentStatus::NoneSet;
+
+private:
+  MYON__UINT16 m_reserved1 = 0U;
+
+public:
+  int m_trim_index = -1;  // index of trim in MYON_Brep.m_T[] array
+
+  // types of trim - access through m_type member.  Also see m_iso and MYON_Surface::ISO
+  enum TYPE 
+  {
+    unknown  = 0,
+    boundary = 1,       // trim is connected to an edge, is part of an outer, 
+                        // inner or slit loop, and is the only trim connected
+                        // to the edge.
+    mated    = 2,       // trim is connected to an edge, is part of an outer,
+                        // inner or slit loop, no other trim from the same 
+                        // loop is connected to the edge, and at least one 
+                        // trim from a different loop is connected to the edge.
+    seam     = 3,       // trim is connected to an edge, is part of an outer loop,
+                        // and exactly one other trim from the same loop is 
+                        // also connected to the edge.  The trims are domain side
+                        // iso's on opposite sides of the surface (e.g E_iso and W_iso) 
+                        // (There can be other mated trims that are also
+                        // connected to the edge.  For example, the non-manifold
+                        // edge that results when a surface edge lies along
+                        // the seam of another surface.) 
+    singular = 4,       // trim is part of an outer loop, the trim's 2d curve
+                        // runs along the singular side of a surface, and the
+                        // trim is NOT connected to an edge. (There is no 3d
+                        // edge because the surface side is singular.)
+    crvonsrf = 5,       // trim is connected to an edge, is the only trim in
+                        // a crfonsrf loop, and is the only trim connected to
+                        // the edge.
+    ptonsrf  = 6,       // trim is a point on a surface, trim.m_pbox is records
+                        // surface parameters, and is the only trim
+                        // in a ptonsrf loop.  This trim is not connected
+                        // to an edge and has no 2d curve.
+    slit     = 7,       // 17 Nov 2006 - reserved for future use
+                        //   currently an invalid value
+    trim_type_count = 8,
+    force_32_bit_trim_type = 0xFFFFFFFF
+  };
+
+  /////////////////////////////////////////////////////////////////
+  // Construction
+  //
+  // In general, you should not directly create MYON_BrepTrim classes.
+  // Use MYON_Brep::NewTrim instead.
+  MYON_BrepTrim();
+  MYON_BrepTrim(int); // trim index
+  MYON_BrepTrim& operator=(const MYON_BrepTrim&);
+
+  /*
+  Returns:
+    Brep that this trim belongs to.
+  */
+  MYON_Brep* Brep() const;
+
+  /*
+  Returns:
+    Brep loop that this trim belongs to.
+  */
+  MYON_BrepLoop* Loop() const;
+
+  /*
+  Returns:
+    Brep face this trim belongs to.
+  */
+  MYON_BrepFace* Face() const;
+
+  /*
+  Returns:
+    Brep edge this trim uses or belongs to.  This will
+    be nullptr for singular trims.
+  */
+  MYON_BrepEdge* Edge() const;
+
+  /*
+  Parameters:
+    tvi - [in] 0 or 1
+  Returns:
+    Brep vertex at specified end of the trim.
+  */
+  MYON_BrepVertex* Vertex(int tvi) const;
+
+  /////////////////////////////////////////////////////////////////
+  // MYON_Object overrides
+  //
+  // (Trims are purely topological - geometry queries should be 
+  //  directed at the trim's 2d curve or the trim's edge's 3d curve.)
+
+  bool IsValid( class MYON_TextLog* text_log = nullptr ) const override;
+
+  void Dump( MYON_TextLog& ) const override; // for debugging
+
+  bool Write( MYON_BinaryArchive& ) const override;
+
+  bool Read( MYON_BinaryArchive& ) override;
+
+  // virtual MYON_Geometry::ComponentIndex() override
+  MYON_COMPONENT_INDEX ComponentIndex() const override;
+
+  // virtual MYON_Curve::Reverse override
+  // Reverses curve - caller must make sure trim's m_bRev3d
+  // flags are properly updated.  Use
+  // MYON_Brep::FlipTrim to reverse and trim and update all
+  // m_bRev3d information.
+  bool Reverse() override;
+
+  /* Not necessary Base class does the same.
+  // virtual MYON_Curve::SetStartPoint override
+  bool SetStartPoint(
+          MYON_3dPoint start_point
+          ) override;
+
+  // virtual MYON_Curve::SetEndPoint override
+  bool SetEndPoint(
+          MYON_3dPoint end_point
+          ) override;
+*/
+  /////////////////////////////////////////////////////////////////
+  // Interface
+  
+  /*
+  Description:
+    Expert user tool that replaces the 2d curve geometry
+    of a trim
+  Parameters;
+    c2i - [in] brep 2d curve index of new curve
+  Returns:
+    True if successful.
+  Example:
+
+            MYON_Curve* pCurve = ...;
+            int c2i = brep.AddTrimCurve(pCurve);
+            trim.ChangeTrimCurve(c2i);
+
+  Remarks:
+    Sets m_c2i, calls SetProxyCurve, cleans runtime caches,
+    and updates m_pbox.
+  */
+  bool ChangeTrimCurve( int c2i );
+
+  /*
+  Description:
+    Destroy parameter space information.
+    Currently, this involves destroying m_pline
+    and m_pbox. Parameter space information should
+    be destroyed when the location of a trim
+    curve is changed.
+  */
+  void DestroyPspaceInformation();
+  
+  /*
+  Description:
+    Expert user function.
+    Removes a trim from an edge.
+  Parameters:
+    bRemoveFromStartVertex - [in] if true, the trim
+      is removed from its start vertex by setting
+      m_vi[0] to -1.
+    bRemoveFromEndVertex - [in] if true, the trim
+      is removed from its start vertex by setting
+      m_vi[1] to -1.
+  Remarks:
+    If the trim is attached to an edge (m_ei>=0), then
+    the trim is removed from the edge and the edge's
+    m_ti[] list.  The trim's m_bRev3d and tolerance values
+    are not changed.
+  */
+  bool RemoveFromEdge( 
+        bool bRemoveFromStartVertex,
+        bool bRemoveFromEndVertex
+        );
+
+  /*
+  Description:
+    Expert user function.
+    Attaches a trim to an edge.
+  Parameters:
+    edge_index - [in] index of an edge.
+    bRev3d - [in] value for trim's m_bRev3d field.
+  Remarks:
+    If the trim is attached to an edge (m_ei>=0), then
+    the trim is removed from the edge and the edge's
+    m_ti[] list.  The trim's tolerance values are not
+    changed.
+  */
+  bool AttachToEdge(
+        int edge_index,
+        bool bRev3d
+        );
+
+  /*
+  Returns:
+    2d curve geometry used by this trim or nullptr
+  */
+  const MYON_Curve* TrimCurveOf() const;
+
+  /*
+  Returns:
+    3d curve geometry used by this trim or nullptr.
+  */
+  const MYON_Curve* EdgeCurveOf() const;
+
+  /*
+  Returns:
+    3d surface geometry used by this trim or nullptr
+  */
+  const MYON_Surface* SurfaceOf() const;
+
+  /*
+  Returns:
+    brep.m_C2[] 2d curve index of the 2d curve geometry used by 
+    this trim or -1.
+  */
+  int TrimCurveIndexOf() const;
+
+  /*
+  Returns:
+    brep.m_C3[] 3d curve index of the 3d curve geometry used by 
+    this trim or -1.
+  */
+  int EdgeCurveIndexOf() const;
+
+  /*
+  Returns:
+    brep.m_S[] surface index of the 3d surface geometry used by 
+    this trim or -1.
+  */
+  int SurfaceIndexOf() const;
+
+  /*
+  Returns:
+    brep.m_F[] face index of the face used by this trim or -1.
+  */
+  int FaceIndexOf() const;
+
+  /*
+  Returns:
+    True if the trim satisfies these four criteria.
+      1) is part of a loop
+      2) is connected to a 3d edge
+      3) one other trim from the same loop is connected to the edge
+      4) The 2d trim curve for the other trim is the reverse
+         of the 2d trim curve for this trim.
+  Remarks:
+    In order for IsSlit() to work correctly, the m_type and m_iso
+    fields must be set correctly.  In V4 SR1, this function will
+    be removed and MYON_BrepTrim::slit will be added as a type.
+  */
+  bool IsSlit() const;
+
+  /*
+  Returns:
+    True if the trim satisfies these four criteria.
+      1) is part of a loop
+      2) is connected to a 3d edge
+      3) one other trim from the same loop is connected to the edge
+      4) the 2d trim curve for this trim lies along the side of 
+         the face's parameter space and the 2d curve for the other
+         trim lies on the opposite side of the face's parameter
+         space.
+  Remarks:
+    In order for IsSeam() to work correctly, the m_type and m_iso
+    fields must be set correctly.  In V4 SR1, this function will
+    be removed and MYON_BrepTrim::slit will be added as a type.
+  */
+  bool IsSeam() const;
+
+  /*
+  Description:
+    Expert user tool that transforms all the parameter space (2d)
+    trimming curves in this loop.  Only 2d curve geometry is
+    changed.  The caller is responsible for reversing loops,
+    toggle m_bRev, flags, etc.
+  Parameters:
+    xform - [in] Transformation applied to 2d curve geometry.
+  Returns
+    True if successful.  If false is returned, the brep
+    may be invalid.
+  */
+  bool TransformTrim( const MYON_Xform& xform );
+
+  // index of the 2d parameter space trimming curve
+  int m_c2i = -1;
+
+  // index of 3d edge (-1 if MYON_BrepTrim is singular)
+  int m_ei = -1;
+
+  // Indices of start/end vertices.  Trims along singular
+  // sides and trims that correspond to closed 3d edges
+  // have m_vi[0] = m_vi[1].  Note that singular trims
+  // and trims on the closed edge of a closed surface can
+  // have an open 2d trimming curve and still have 
+  // m_vi[0] = m_vi[1].
+  int m_vi[2];
+        
+  // true if the 2d trim and 3d edge have opposite orientations.
+  bool   m_bRev3d = false;
+
+  TYPE   m_type = MYON_BrepTrim::unknown;
+  MYON_Surface::ISO  m_iso = MYON_Surface::not_iso;
+
+  // index of loop that uses this trim
+  int    m_li = -1;
+
+  // The values in m_tolerance[] record the accuracy of
+  // the parameter space trimming curves.
+  //
+  // Remarks:
+  //   m_tolerance[0] = accuracy of parameter space curve
+  //   in first ( "u" ) parameter
+  //
+  //   m_tolerance[1] = accuracy of parameter space curve
+  //   in second ( "v" ) parameter
+  //
+  //   A value of MYON_UNSET_VALUE indicates that the 
+  //   tolerance should be computed. If the value >= 0.0, 
+  //   then the tolerance is set.  If the value is 
+  //   MYON_UNSET_VALUE, then the tolerance needs to be
+  //   computed.
+  //
+  //   If the trim is not singular, then the trim must
+  //   have an edge.  If P is a 3d point on the edge's
+  //   curve and surface(u,v) = Q is the point on the 
+  //   surface that is closest to P, then there must
+  //   be a parameter t in the interval [m_t[0], m_t[1]]
+  //   such that
+  //
+  //   |u - curve2d(t)[0]| <= m_tolerance[0]
+  //
+  //   and 
+  //
+  //   |v - curve2d(t)[1]| <= m_tolerance[1]
+  //
+  //   If P is the 3d point for the vertex brep.m_V[m_vi[k]]
+  //   and (uk,vk) is the corresponding end of the trim's
+  //   parameter space curve, then there must be a surface
+  //   parameter (u,v) such that:
+  //
+  //   *  the distance from the 3d point surface(u,v) to P
+  //      is <= brep.m_V[m_vi[k]].m_tolerance,
+  //   *  |u-uk| <= m_tolerance[0].
+  //   *  |v-vk| <= m_tolerance[1].
+  double m_tolerance[2]; 
+
+  // Runtime polyline approximation of trimming curve.
+  // This information is not saved in 3DM archives.
+  MYON_SimpleArray<MYON_BrepTrimPoint> m_pline;
+
+  /*
+  Description:
+    When an edge is modified, the m_pline[].e values need
+    to be set to MYON_UNSET_VALUE by calling UnsetPlineEdgeParameters().
+  */
+  void UnsetPlineEdgeParameters();
+
+  // Runtime parameter space trimming curve bounding box.
+  // This information is not saved in 3DM archives.
+  MYON_BoundingBox m_pbox;
+
+public:
+  // values stored in legacy file formats - ignore
+
+  void m__legacy_flags_Set(int,int);   // used internally - ignore
+  bool m__legacy_flags_Get(int*,int*) const; // used internally - ignore
+  double m__legacy_2d_tol = MYON_UNSET_VALUE; // used internally - ignore
+  double m__legacy_3d_tol = MYON_UNSET_VALUE; // used internally - ignore
+  int    m__legacy_flags = 0;  // used internally - ignore
+
+private:
+  friend class MYON_Brep;
+  MYON_Brep* m_brep = nullptr; // so isolated edge class edge can get at it's 3d curve
+  MYON_BrepTrim( const MYON_BrepTrim& ) = delete;
+};
+
+class MYON_CLASS MYON_BrepLoop : public  MYON_Geometry
+{
+  MYON_OBJECT_DECLARE(MYON_BrepLoop);
+
+public:
+  void DestroyRuntimeCache( bool bDelete = true ) override;
+
+  // virtual MYON_Geometry overrides
+  // A loop is derived from MYON_Geometry so that is can 
+  // be passed around to things that expect MYON_Geometry
+  // pointers.  It is not a very useful stand-alone object.
+
+  /*
+  Description:
+    virtual MYON_Geometry::Dimension() override.
+  Returns:
+    2
+  */
+  int Dimension() const override;
+
+  // virtual MYON_Geometry GetBBox override		
+  bool GetBBox( double* boxmin, double* boxmax, bool bGrowBox = false ) const override;
+
+  // virtual MYON_Geometry::Transform() override.
+  bool Transform( 
+         const MYON_Xform& xform
+         ) override;
+public:
+  /*
+  Returns:
+   Brep that the loop belongs to.
+  */
+  MYON_Brep* Brep() const;
+
+  /*
+  Returns:
+    Brep face this loop belongs to.
+  */
+  MYON_BrepFace* Face() const;
+
+  /*
+  Parameters:
+    lti - [in] index into the loop's m_ti[] array.
+  Returns:
+    The trim brep.m_T[loop.m_ti[lti]];
+  */
+  MYON_BrepTrim* Trim( int lti ) const;
+
+  /*
+  Returns:
+    Number of trims in this loop.
+  */
+  int TrimCount() const;
+
+  // Union available for application use.
+  // The constructor zeros m_loop_user.
+  // The value is of m_loop_user is not saved in 3DM
+  // archives and may be changed by some computations.
+  mutable MYON_U m_loop_user;
+
+public:
+  mutable MYON_ComponentStatus m_status = MYON_ComponentStatus::NoneSet;
+
+private:
+  MYON__UINT16 m_reserved1 = 0U;
+
+public:
+  int m_loop_index = -1;  // index of loop in MYON_Brep.m_L[] array
+
+  enum TYPE {
+    unknown  = 0,
+    outer    = 1,  // 2d loop curves form a simple closed curve with a counterclockwise orientation
+    inner    = 2,  // 2d loop curves form a simple closed curve with a clockwise orientation
+    slit     = 3,  // always closed - used internally during splitting operations
+    crvonsrf = 4,  // "loop" is a curveonsrf made from a single 
+                   // (open or closed) trim that is has type MYON_BrepTrim::crvonsrf.
+    ptonsrf = 5,   // "loop" is a ptonsrf made from a single 
+                   // trim that is has type MYON_BrepTrim::ptonsrf.
+    type_count = 6
+  };
+
+  MYON_BrepLoop();
+  MYON_BrepLoop(int); // loop index
+  MYON_BrepLoop& operator=(const MYON_BrepLoop&);
+
+  /////////////////////////////////////////////////////////////////
+  // MYON_Object overrides
+  //
+  // (Loops and trims are purely topological - geometry queries should be 
+  // directed at the trim's 2d curve or the trim's edge's 3d curve.)
+
+  // virtual MYON_Object::SizeOf override
+  unsigned int SizeOf() const override;
+
+  bool IsValid( class MYON_TextLog* text_log = nullptr ) const override;
+
+  void Dump( MYON_TextLog& ) const override; // for debugging
+
+  bool Write( MYON_BinaryArchive& ) const override;
+
+  bool Read( MYON_BinaryArchive& ) override;
+
+  // virtual MYON_Geometry::ComponentIndex() override
+  MYON_COMPONENT_INDEX ComponentIndex() const override;
+
+  /////////////////////////////////////////////////////////////////
+  // Interface
+
+  //////////
+  // Returns the index i such that loop.m_ti[i] = trim.m_trim_index.
+  // Returns -1 if the trim is not in this loop
+  int IndexOfTrim( const MYON_BrepTrim& ) const;
+
+  /*
+  Returns:
+    brep.m_S[] surface index of the 3d surface geometry used by 
+    this loop or -1.
+  */
+  int SurfaceIndexOf() const;
+
+  /*
+  Returns:
+    Pointer to the surface geometry used by the loop.   
+  */
+  const MYON_Surface* SurfaceOf() const;
+
+  /*
+  Description:
+    Expert user tool that transforms all the parameter space (2d)
+    trimming curves in this loop.  Only 2d curve geometry is
+    changed.  The caller is responsible for reversing loops,
+    toggle m_bRev, flags, etc.
+  Parameters:
+    xform - [in] Transformation applied to 2d curve geometry.
+  Returns
+    True if successful.  If false is returned, the brep
+    may be invalid.
+  */
+  bool TransformTrim( const MYON_Xform& xform );
+
+  MYON_SimpleArray<int> m_ti;   // trim indices
+  TYPE         m_type = MYON_BrepLoop::unknown;
+  int          m_fi = -1;   // index of face that uses this loop
+
+  //////////
+  // parameter space trimming loop bounding box
+  // runtime information - not saved
+  MYON_BoundingBox m_pbox;
+private:
+  friend class MYON_Brep;
+  MYON_Brep* m_brep = nullptr;
+  MYON_BrepLoop(const MYON_BrepLoop&) = delete;
+};
+
+
+class MYON_CLASS MYON_BrepFace : public MYON_SurfaceProxy
+{
+  MYON_OBJECT_DECLARE(MYON_BrepFace);
+
+public:
+  void DestroyRuntimeCache( bool bDelete = true ) override;
+
+  // Union available for application use.
+  // The constructor zeros m_face_user.
+  // The value is of m_face_user is not saved in 3DM
+  // archives and may be changed by some computations.
+  mutable MYON_U m_face_user;
+
+public:
+  mutable MYON_ComponentStatus m_status = MYON_ComponentStatus::NoneSet;
+
+private:
+  // the 4 byte pack id is stored as 2 MYON__UINT16 values to prevent breaking the C++ SDK.
+  MYON__UINT16 m_pack_id_low = 0; // PackId() = 0x10000*m_pack_id_high + m_pack_id_low;
+
+public:
+  int m_face_index = -1;  // index of face in MYON_Brep.m_F[] array
+
+  MYON_BrepFace();
+  ~MYON_BrepFace();
+  MYON_BrepFace(int);
+  MYON_BrepFace& operator=(const MYON_BrepFace&);
+
+  /*
+  Returns:
+   Brep that the face belongs to.
+  */
+  MYON_Brep* Brep() const;
+
+  /*
+  Parameters:
+    fli - [in] index into the face's m_li[] array.
+  Returns:
+    The loop brep.m_L[face.m_li[fli]];
+  */
+  MYON_BrepLoop* Loop( int fli ) const;
+
+  /*
+  Returns:
+    Number of loops in this face.
+  */
+  int LoopCount() const;
+
+  /*
+  Returns:
+    Outer boundary loop for this face.
+  */
+  MYON_BrepLoop* OuterLoop() const;
+
+  /*
+  Parameters:
+    dir
+       1: side with underlying surface normal
+         pointing into the topology region
+      -1: side with underlying surface normal
+          pointing out of the topology region
+  Returns:
+    Brep region topology face side.  If the region
+    topology has not be created by calling
+    MYON_Brep::RegionToplogy(), then nullptr is returned.
+  */
+  class MYON_BrepFaceSide* FaceSide(int dir) const;
+
+
+  /////////////////////////////////////////////////////////////////
+  // MYON_Object overrides
+  //
+  // (Faces are purely topological - geometry queries should be 
+  //  directed at the face's 3d surface.)
+
+  // virtual MYON_Object::SizeOf override
+  unsigned int SizeOf() const override;
+
+  // virtual MYON_Object::DataCRC override
+  MYON__UINT32 DataCRC(MYON__UINT32 current_remainder) const override;
+
+  bool IsValid( class MYON_TextLog* text_log = nullptr ) const override;
+
+  void Dump( MYON_TextLog& ) const override; // for debugging
+
+  bool Write( MYON_BinaryArchive& ) const override;
+
+  bool Read( MYON_BinaryArchive& ) override;
+
+  // virtual MYON_Geometry::ComponentIndex() override
+  MYON_COMPONENT_INDEX ComponentIndex() const override;
+
+  // virtual MYON_Geometry::ClearBoundingBox() override
+  void ClearBoundingBox() override;
+
+  // virtual MYON_Geometry GetBBox override		
+  bool GetBBox( double* boxmin, double* boxmax, bool bGrowBox = false ) const override;
+
+
+  /*
+  Description:
+    This is an override of the virtual MYON_Surface::Reverse
+    function.  It toggles the face's m_bRev flag so the abstract
+    orientation of the face does not change.
+  Parameters:
+    dir - [in] 0 = reverse "s" parameter, 1 = reverse "t" parameter
+         The domain changes from [a,b] to [-a,-b]
+  Returns:
+    True if successful.
+  Remarks:
+    The range of the face's trimming curves and the orientation direction
+    of then loops are changed so that the resulting face is still valid.
+  */
+  bool Reverse(
+    int dir
+    ) override;
+
+  /*
+  Description:
+    This is an override of the virtual MYON_Surface::Transpose
+    function.  It toggles the face's m_bRev flag so the abstract
+    orientation of the face does not change.
+  Returns:
+    True if successful.
+  Remarks:
+    The range of the face's trimming curves and the orientation direction
+    of then loops are changed so that the resulting face is still valid.
+  */
+  bool Transpose() override;
+
+  /*
+  Description:
+    This is an override of the virtual MYON_Surface::SetDomain
+    function.
+  Parameters:
+    dir - [in] 0 = set "u" domain, 1 = set "v" domain.
+    t0 - [in]
+    t1 - [in] t0 < t1  The new domain is the interval (t0,t1)
+  Returns:
+    True if successful.
+  */
+  bool SetDomain(
+    int dir,
+    double t0,
+    double t1
+    ) override;
+
+  /*
+  //////////
+  // Change the domain of a face
+  // This changes the parameterization of the face's surface and transforms
+  // the "u" and "v" coordinates of all the face's parameter space trimming
+  // curves.  The locus of the face is not changed.
+  */
+  bool SetDomain(
+         MYON_Interval udom,
+         MYON_Interval vdom
+         );
+
+  /////////////////////////////////////////////////////////////////
+  // Rendering Interface
+  //int MaterialIndex() const; // if -1, use parent's material definition
+  //void SetMaterialIndex(int);
+
+  // If true is returned, then ~MYON_BrepFace will delete mesh.
+  bool SetMesh( MYON::mesh_type, MYON_Mesh* mesh );
+
+  //Internal storage is now a std::shared_ptr to const MYON_Mesh, so allow it to be set and accessed as such
+  bool SetMesh(MYON::mesh_type, const std::shared_ptr<const MYON_Mesh>& mesh);
+
+  const MYON_Mesh* Mesh( MYON::mesh_type mesh_type ) const;
+
+  //Internal storage is now a std::shared_ptr to const MYON_Mesh, so allow it to be set and accessed as such
+  const std::shared_ptr<const MYON_Mesh>& SharedMesh(MYON::mesh_type mesh_type) const;
+
+  //Note that while this function returns a std::shared_ptr<const MYON_Mesh>, the MYON_Mesh is guaranteed unique and
+  //can be modified.
+  const std::shared_ptr<const MYON_Mesh>& UniqueMesh(MYON::mesh_type mesh_type);
+
+  /*
+  Description:
+    Destroy meshes used to render and analyze surface and polysurface objects.
+  Parameters:
+    mesh_type - [in] type of mesh to destroy
+    bDeleteMesh - [in] if true, cached mesh is deleted.
+      If false, pointer to cached mesh is just set to nullptr.
+  See Also:
+    CRhinoObject::GetMeshes
+    CRhinoObject::MeshCount
+    CRhinoObject::IsMeshable
+  */
+  MYON_DEPRECATED_MSG("Support for bDeleteMesh no longer supported") void DestroyMesh( MYON::mesh_type mesh_type, bool bDeleteMesh);
+
+  /*
+  Description:
+    Destroy meshes used to render and analyze surface and polysurface objects.
+  Parameters:
+    mesh_type - [in] type of mesh to destroy
+  See Also:
+    CRhinoObject::GetMeshes
+    CRhinoObject::MeshCount
+    CRhinoObject::IsMeshable
+  */
+  void DestroyMesh(MYON::mesh_type mesh_type);
+
+  /////////////////////////////////////////////////////////////////
+  // "Expert" Interface
+
+  /*
+  Description:
+    Expert user tool that transforms all the parameter space (2d)
+    trimming curves on this face.  Only 2d curve geometry is
+    changed.  The caller is responsible for reversing loops,
+    toggle m_bRev, flags, etc.
+  Parameters:
+    xform - [in] Transformation applied to 2d curve geometry.
+  Returns
+    True if successful.  If false is returned, the brep
+    may be invalid.
+  */
+  bool TransformTrim( const MYON_Xform& xform );
+
+  
+  /*
+  Returns:
+    brep.m_S[] surface index of the 3d surface geometry used by 
+    this face or -1.
+  */
+  int SurfaceIndexOf() const;
+
+  /*
+  Returns:
+    Pointer to the surface geometry used by the face.   
+  */
+  const MYON_Surface* SurfaceOf() const;
+
+
+
+  MYON_SimpleArray<int> m_li; // loop indices (outer loop is m_li[0])
+  int m_si = -1;            // index of surface in b-rep m_S[] array
+  bool m_bRev = false;         // true if face orientation is opposite
+                       //      of natural surface orientation
+
+
+  /*
+  Returns:
+    0: unset pack id.
+    > 0: set pack id.
+  Remarks:
+    PackId values assigned to brep faces are inheritied from the PackId values
+    assigned to subd faces when a subd is converted into a brep.
+    These faces are "trivially trimmed" which means the boundary of the face
+    is identical to the boundary of the underlying surface.
+    There are two types of face packs in a subd, quad grid packs and singleton packs.
+    A subd quad grid pack is a set of subd quads that form a rectangular grid.
+    A subd singleton pack is a single face, quad or n-gon, that is not part of
+    a quad grid pack. 
+    There are three types of face packs in a brep created from a subd, 
+    grid packs, star packs and singleton packs.
+    A brep "grid pack" comes from a rectangular grid of subd quads. A grid pack of brep faces can
+    be converted into a single larger trivially trimmed brep face.
+    A brep "star pack" of brep faces comes from a singel subd n-gon (n = 3, 5 or more). The star pack
+    will have n faces with a star center vertex and shared edges radiating from  the star center.
+    A brep "singleton" pack comes from a single subd quad that could not be grouped into a larger
+    subd quad grid pack.
+  */
+  unsigned int PackId() const;
+
+  /*
+  Description:
+    Sets PackId() to zero.
+  */
+  void ClearPackId();
+
+  /*
+  Description:
+    Used by MYON_SubD functions that create breps to transmit the subd face MYON_SubDFace.PackId() value 
+    to the brep face or faces generated from the subd face.
+    Unless you are an expert and doing something very carefully and very fancy, to not call this function.
+  Remarks:
+    PackId values assigned to brep faces are inheritied from the PackId values
+    assigned to subd faces when a subd is converted into a brep.
+    These faces are "trivially trimmed" which means the boundary of the face
+    is identical to the boundary of the underlying surface.
+    There are two types of face packs in a subd, quad grid packs and singleton packs.
+    A subd quad grid pack is a set of subd quads that form a rectangular grid.
+    A subd singleton pack is a single face, quad or n-gon, that is not part of
+    a quad grid pack.
+    There are three types of face packs in a brep created from a subd,
+    grid packs, star packs and singleton packs.
+    A brep "grid pack" comes from a rectangular grid of subd quads. A grid pack of brep faces can
+    be converted into a single larger trivially trimmed brep face.
+    A brep "star pack" of brep faces comes from a singel subd n-gon (n = 3, 5 or more). The star pack
+    will have n faces with a star center vertex and shared edges radiating from  the star center.
+    A brep "singleton" pack comes from a single subd quad that could not be grouped into a larger
+    subd quad grid pack.
+  */
+  void SetPackIdForExperts(
+    unsigned int pack_id
+  );
+
+private:
+  MYON__UINT8 m_reserved2 = 0;
+
+private:
+  // the 4 byte pack id is stored as 2 MYON__UINT16 values to prevent breaking the C++ SDK.
+  MYON__UINT16 m_pack_id_high = 0; // PackId() = 0x10000*m_pack_id_high + m_pack_id_low;
+
+public:
+  // The application specifies a base MYON_Material used to render the brep this face belongs to.
+  // If m_material_channel_index > 0 AND face_material_id = base.MaterialChannelIdFromIndex(m_material_channel_index)
+  // is not nil, then face_material_id identifies an override rendering material for this face.
+  // Otherwise base will be used to render this face.
+  int m_face_material_channel = 0;
+
+public:
+  /*
+  Description:
+    Set this face's rendering material channel index.
+
+  Parameters:
+    material_channel_index - [in]
+      A value between 0 and MYON_Material::MaximumMaterialChannelIndex, inclusive.
+      This value is typically 0 or the value returned from MYON_Material::MaterialChannelIndexFromId().
+
+  Remarks:
+    If base_material is the MYON_Material assigned to render this brep and
+    MYON_UUID face_material_id = base_material.MaterialChannelIdFromIndex( material_channel_index )
+    is not nil, then face_material_id identifies an override rendering material for this face.
+    Otherwise base_material is used to render this face.
+  */
+  void SetMaterialChannelIndex(int material_channel_index) const;
+
+  /*
+  Description:
+    Remove per face rendering material channel index setting. The face will use the material assigned to the brep object.
+  */
+  void ClearMaterialChannelIndex() const;
+
+  /*
+  Returns:
+    This face's rendering material channel index.
+
+    Remarks:
+    If base_material is the MYON_Material assigned to render this subd, MaterialChannelIndex() > 0,
+    and MYON_UUID face_material_id = base_material.MaterialChannelIdFromIndex( face.MaterialChannelIndex() )
+    is not nil, then face_material_id identifies an override rendering material for this face.
+    Otherwise base_material is used to render this face.
+  */
+  int MaterialChannelIndex() const;
+
+  /*
+  Description:
+    Set per face color.
+
+  Parameters:
+    color - [in]
+  */
+  void SetPerFaceColor(
+    MYON_Color color
+    ) const;
+
+  /*
+  Description:
+    Remove per face color setting. The face will use the color assigned to the brep object.
+  */
+  void ClearPerFaceColor() const;
+
+  /*
+  Returns:
+    Per face color. A value of MYON_Color::UnsetColor indicates the face uses the color assigned to the brep object.
+  */
+  const MYON_Color PerFaceColor() const;
+
+public:
+
+  // Persistent id for this face.  Default is MYON_nil_uuid.
+  MYON_UUID m_face_uuid = MYON_nil_uuid;
+
+private:
+  // RH-37306
+  // 30 Mar 2020: Space reserved for future implementation.
+  mutable MYON_Color m_per_face_color = MYON_Color::UnsetColor;
+
+private:
+  MYON_BoundingBox m_bbox;      // 3d bounding box (should be declared mutable and const_cast<> is used to make it fake mutable)
+  MYON_Interval    m_domain[2]; // rectangular bounds of 2d curves
+  //MYON_Mesh* m_render_mesh = nullptr;
+  //MYON_Mesh* m_analysis_mesh = nullptr;
+  //MYON_Mesh* m_preview_mesh = nullptr;
+
+  //New impl declaration to replace the old mesh pointers.
+  class Impl;
+  Impl* m_pImpl;
+  friend Impl;
+
+  //Pad out the size to match the old.
+  void* m_reserved0 = nullptr;
+  void* m_reserved1 = nullptr;
+
+  //int m_material_index; // if 0 (default), MYON_Brep's object attributes
+  //                      // determine material.
+private:
+  friend class MYON_Brep;
+  MYON_Brep* m_brep = nullptr;
+  MYON_BrepFace( const MYON_BrepFace& ) = delete;
+
+private:
+  /*
+  Parameters:
+    bLazy - [in]
+      If true and if MYON_BrepFace.m_bbox is not empty, then MYON_BrepFace.m_bbox is returned.
+      In all other cases the bbox is calculated from scratch.
+    bUpdateCachedBBox - [in]
+      If true and the bounding box is calculated, then the value is saved in MYON_BrepFace.m_bbox
+      so future lazy evaluations can use the value.
+  */
+  const MYON_BoundingBox InternalFaceBoundingBox(bool bLazy, bool bUpdateCachedBBox) const;
+};
+
+class MYON_CLASS MYON_BrepFaceSide : public MYON_Object
+{
+  MYON_OBJECT_DECLARE(MYON_BrepFaceSide);
+public:
+  bool IsValid( class MYON_TextLog* text_log = nullptr ) const override;
+
+  // Union available for application use.
+  // The constructor zeros m_faceside_user.
+  // The value is of m_faceside_user is not saved in 3DM
+  // archives and may be changed by some computations.
+  mutable MYON_U m_faceside_user;
+
+  // index of face side in MYON_BrepRegionTopology.m_FS[] array
+  int m_faceside_index;  
+
+  MYON_BrepFaceSide();
+  ~MYON_BrepFaceSide();
+  MYON_BrepFaceSide& operator=(const MYON_BrepFaceSide&);
+
+  bool Write(MYON_BinaryArchive& binary_archive) const override;
+  bool Read(MYON_BinaryArchive& binary_archive) override;
+
+
+  /*
+  Returns:
+   Brep this face side belongs to.
+  */
+  const class MYON_Brep* Brep() const;
+
+  /*
+  Returns:
+    Region topology this face side belongs to.
+  */
+  const class MYON_BrepRegionTopology* RegionTopology() const;
+
+  /*
+  Returns:
+   Region the face side belongs to.
+  */
+  const class MYON_BrepRegion* Region() const;
+
+  /*
+  Returns:
+   Face this side belongs to.
+  */
+  const class MYON_BrepFace* Face() const;
+
+  /*
+  Returns:
+   +1: underlying geometric surface normal points
+       into region.
+   -1: underlying geometric surface normal points
+       out of region.
+  */
+  int SurfaceNormalDirection() const;
+
+public:
+  int m_ri; // region index 
+            // m_ri = -1 indicates this face side overlaps
+            // another face side. Generally this is a flaw
+            // in an MYON_Brep.
+  int m_fi; // face index
+  int m_srf_dir; //  1 MYON_BrepFace's surface normal points into region
+                 // -1 MYON_BrepFace's surface normal points out of region
+
+private:
+  friend class MYON_Brep;
+  friend class MYON_BrepRegionTopology;
+  MYON_BrepRegionTopology* m_rtop;
+  MYON_BrepFaceSide( const MYON_BrepFaceSide& );
+};
+
+class MYON_CLASS MYON_BrepRegion : public MYON_Object
+{
+  MYON_OBJECT_DECLARE(MYON_BrepRegion);
+public:
+  bool IsValid( class MYON_TextLog* text_log = nullptr ) const override;
+
+  // Union available for application use.
+  // The constructor zeros m_region_user.
+  // The value is of m_region_user is not saved in 3DM
+  // archives and may be changed by some computations.
+  mutable MYON_U m_region_user;
+
+  // index of region in MYON_BrepRegionTopology.m_R[] array
+  int m_region_index;
+
+  MYON_BrepRegion();
+  ~MYON_BrepRegion();
+  MYON_BrepRegion& operator=(const MYON_BrepRegion&);
+
+  bool Write(MYON_BinaryArchive& binary_archive) const override;
+  bool Read(MYON_BinaryArchive& binary_archive) override;
+
+  /*
+  Returns:
+   Brep this region belongs to.
+  */
+  const MYON_Brep* Brep() const;
+
+  /*
+  Returns:
+    Region topology this region belongs to.
+  */
+  class MYON_BrepRegionTopology* RegionTopology() const;
+
+  /*
+  Parameter:
+    rfsi - [in] index into the region's m_fsi[] array.
+  Returns:
+    The face side in rtop.m_FS[m_fsi[rsi]], where
+    rtop is the MYON_BrepRegionTopology class this
+    region belongs to.
+  */
+  MYON_BrepFaceSide* FaceSide(int rfsi) const;
+
+  /*
+  Returns:
+    True if the region is finite.
+  */
+  bool IsFinite() const;
+
+  /*
+  Returns:
+   Region bounding box.
+  */
+  const MYON_BoundingBox& BoundingBox() const;
+
+  MYON_SimpleArray<int> m_fsi; // indices of face sides
+  int m_type; // 0 = infinite, 1 = bounded
+  MYON_BoundingBox m_bbox;
+
+  /*
+  Description:
+    Get the boundary of a region as a brep object.  
+    If the region is finite, the boundary will be a closed
+    manifold brep.  The boundary may have more than one
+    connected component.
+  Parameters:
+    brep - [in] if not nullptr, the brep form is put into
+                this brep.
+  Returns: the region boundary as a brep or nullptr if the
+           calculation fails.
+  */
+  MYON_Brep* RegionBoundaryBrep( MYON_Brep* brep = nullptr ) const;
+
+
+private:
+  friend class MYON_Brep;
+  friend class MYON_BrepRegionTopology;
+  MYON_BrepRegionTopology* m_rtop;
+  MYON_BrepRegion( const MYON_BrepRegion& );
+};
+
+#if defined(MYON_DLL_TEMPLATE)
+MYON_DLL_TEMPLATE template class MYON_CLASS MYON_ClassArray<MYON_BrepVertex>;
+MYON_DLL_TEMPLATE template class MYON_CLASS MYON_ObjectArray<MYON_BrepVertex>;
+MYON_DLL_TEMPLATE template class MYON_CLASS MYON_ClassArray<MYON_BrepEdge>;
+MYON_DLL_TEMPLATE template class MYON_CLASS MYON_ObjectArray<MYON_BrepEdge>;
+MYON_DLL_TEMPLATE template class MYON_CLASS MYON_ClassArray<MYON_BrepTrim>;
+MYON_DLL_TEMPLATE template class MYON_CLASS MYON_ObjectArray<MYON_BrepTrim>;
+MYON_DLL_TEMPLATE template class MYON_CLASS MYON_ClassArray<MYON_BrepLoop>;
+MYON_DLL_TEMPLATE template class MYON_CLASS MYON_ObjectArray<MYON_BrepLoop>;
+MYON_DLL_TEMPLATE template class MYON_CLASS MYON_ClassArray<MYON_BrepFace>;
+MYON_DLL_TEMPLATE template class MYON_CLASS MYON_ObjectArray<MYON_BrepFace>;
+MYON_DLL_TEMPLATE template class MYON_CLASS MYON_ObjectArray<MYON_BrepFaceSide>;
+MYON_DLL_TEMPLATE template class MYON_CLASS MYON_ObjectArray<MYON_BrepRegion>;
+#endif
+
+class MYON_CLASS MYON_BrepVertexArray : public MYON_ObjectArray<MYON_BrepVertex>
+{
+public:
+  MYON_BrepVertexArray();
+  ~MYON_BrepVertexArray();
+
+  bool Read( MYON_BinaryArchive& );
+  bool Write( MYON_BinaryArchive& ) const;
+
+  unsigned int SizeOf() const;
+};
+
+class MYON_CLASS MYON_BrepEdgeArray   : public  MYON_ObjectArray<MYON_BrepEdge>
+{
+public:
+  MYON_BrepEdgeArray();
+  ~MYON_BrepEdgeArray();
+  bool Read( MYON_BinaryArchive& );
+  bool Write( MYON_BinaryArchive& ) const;
+
+  unsigned int SizeOf() const;
+};
+
+class MYON_CLASS MYON_BrepTrimArray   : public  MYON_ObjectArray<MYON_BrepTrim>
+{
+public:
+  MYON_BrepTrimArray();
+  ~MYON_BrepTrimArray();
+  bool Read( MYON_BinaryArchive& );
+  bool Write( MYON_BinaryArchive& ) const;
+
+  unsigned int SizeOf() const;
+};
+
+class MYON_CLASS MYON_BrepLoopArray   : public  MYON_ObjectArray<MYON_BrepLoop>
+{
+public:
+  MYON_BrepLoopArray();
+  ~MYON_BrepLoopArray();
+  bool Read( MYON_BinaryArchive& );
+  bool Write( MYON_BinaryArchive& ) const;
+
+  unsigned int SizeOf() const;
+};
+
+class MYON_CLASS MYON_BrepFaceArray   : public  MYON_ObjectArray<MYON_BrepFace>
+{
+public:
+  MYON_BrepFaceArray();
+  ~MYON_BrepFaceArray();
+  bool Read( MYON_BinaryArchive& );
+  bool Write( MYON_BinaryArchive& ) const;
+
+  unsigned int SizeOf() const;
+};
+
+class MYON_CLASS MYON_BrepFaceSideArray : public MYON_ObjectArray<MYON_BrepFaceSide>
+{
+public:
+  MYON_BrepFaceSideArray();
+  ~MYON_BrepFaceSideArray();
+
+  bool Read( MYON_BinaryArchive& );
+  bool Write( MYON_BinaryArchive& ) const;
+
+  unsigned int SizeOf() const;
+
+private:
+  bool Internal_ReadV5( MYON_BinaryArchive& );
+  bool Internal_ReadV6( MYON_BinaryArchive& );
+
+  bool Internal_WriteV5( MYON_BinaryArchive& ) const;
+  bool Internal_WriteV6( MYON_BinaryArchive& ) const;
+};
+
+class MYON_CLASS MYON_BrepRegionArray : public MYON_ObjectArray<MYON_BrepRegion>
+{
+public:
+  MYON_BrepRegionArray();
+  ~MYON_BrepRegionArray();
+
+  bool Read( MYON_BinaryArchive& );
+  bool Write( MYON_BinaryArchive& ) const;
+
+  unsigned int SizeOf() const;
+
+private:
+  bool Internal_ReadV5( MYON_BinaryArchive& );
+  bool Internal_ReadV6( MYON_BinaryArchive& );
+
+  bool Internal_WriteV5( MYON_BinaryArchive& ) const;
+  bool Internal_WriteV6( MYON_BinaryArchive& ) const;
+};
+
+class MYON_CLASS MYON_BrepRegionTopology
+{
+public:
+  MYON_BrepRegionTopology();
+  MYON_BrepRegionTopology(const MYON_BrepRegionTopology& src);
+  ~MYON_BrepRegionTopology();
+  MYON_BrepRegionTopology& operator=(const MYON_BrepRegionTopology&);
+
+  MYON_BrepFaceSideArray m_FS;
+  MYON_BrepRegionArray m_R;
+
+
+  const MYON_Brep* Brep() const;
+  bool IsValid( MYON_TextLog* text_log = 0 ) const;
+  bool Read( MYON_BinaryArchive& );
+  bool Write( MYON_BinaryArchive& ) const;
+
+  unsigned int SizeOf() const;
+
+  bool Transform(
+    const MYON_Xform& xform
+  );
+
+
+private:
+  friend class MYON_V5_BrepRegionTopologyUserData;
+  friend class MYON_Brep;
+  const MYON_Brep* m_brep = nullptr;
+};
+
+class MYON_CLASS MYON_Brep : public MYON_Geometry 
+{
+  MYON_OBJECT_DECLARE(MYON_Brep);
+
+public:
+
+  /////////////////////////////////////////////////////////////////
+  //
+  // Component status interface
+  //
+  //
+
+  //virtual
+  unsigned int ClearComponentStates(
+    MYON_ComponentStatus states_to_clear
+    ) const override;
+
+  //virtual
+  unsigned int GetComponentsWithSetStates(
+    MYON_ComponentStatus states_filter,
+    bool bAllEqualStates,
+    MYON_SimpleArray< MYON_COMPONENT_INDEX >& components
+    ) const override;
+  
+  //virtual
+  unsigned int SetComponentStates(
+    MYON_COMPONENT_INDEX component_index,
+    MYON_ComponentStatus states_to_set
+    ) const override;
+
+  //virtual
+  unsigned int ClearComponentStates(
+    MYON_COMPONENT_INDEX component_index,
+    MYON_ComponentStatus states_to_clear
+    ) const override;
+  
+  //virtual
+  unsigned int SetComponentStatus(
+    MYON_COMPONENT_INDEX component_index,
+    MYON_ComponentStatus status_to_copy
+    ) const override;
+
+  //virtual
+ MYON_AggregateComponentStatus AggregateComponentStatus() const override;
+
+  //virtual
+  void MarkAggregateComponentStatusAsNotCurrent() const override;
+
+  // virtual MYON_Object::DestroyRuntimeCache override
+  void DestroyRuntimeCache( bool bDelete = true ) override;
+
+  // virtual MYON_Object::SizeOf override
+  unsigned int SizeOf() const override;
+
+  // virtual MYON_Object::DataCRC override
+  MYON__UINT32 DataCRC(MYON__UINT32 current_remainder) const override;
+
+  // virtual MYON_Geometry override
+  bool EvaluatePoint( const class MYON_ObjRef& objref, MYON_3dPoint& P ) const override;
+
+public:
+
+
+  /*
+  Description:
+    Use MYON_Brep::New() instead of new MYON_Brep() when writing
+    Rhino plug-ins (or when openNURBS is used as a Microsoft 
+    DLL and you need to create a new MYON_Brep in a different 
+    .EXE or .DLL).
+  Example:
+
+              // bad - MYON_Brep* pBrep = new MYON_Brep();
+              MYON_Brep* pBrep = MYON_Brep::New(); // good
+              ...
+              delete pBrep;
+              pBrep = nullptr;
+
+  Returns:
+    Pointer to an MYON_Brep.  Destroy by calling delete.
+  Remarks:
+    When openNURBS is used as a Microsoft DLL, the CL.EXE
+    compiler uses local vtables for classes that are new-ed
+    in other executables but uses the ordinary vtable for
+    for classes that are allocated in functions like
+    MYON_BrepCylinder(), MYON_NurbsSurfaceQuadrilateral(),
+    MYON_Cylinder::RevSurfaceForm(nullptr), etc.
+    Using static New() functions like MYON_Brep::New() insures
+    that identical classes has the same vtable and makes
+    all code run identically.
+  */
+  static MYON_Brep* New();
+
+  /*
+  Description:
+    Use MYON_Brep::New(const MYON_Brep& src) instead 
+    of new MYON_Brep(const MYON_Brep& src).
+  Returns:
+    Pointer to an MYON_Brep.  Destroy by calling delete.
+  Remarks:
+    See static MYON_Brep* MYON_Brep::New() for details.
+  */
+  static MYON_Brep* New(const MYON_Brep&);
+
+	// Construction
+  MYON_Brep();
+	~MYON_Brep();		
+  MYON_Brep(const MYON_Brep&);
+  MYON_Brep& operator=(const MYON_Brep&);
+
+  // Override of virtual MYON_Object::MemoryRelocate
+  void MemoryRelocate() override;
+
+
+  /*
+  Description:
+    Does nothing. Will be deleted in next version.
+  */
+  MYON_DEPRECATED_MSG("Does nothing. Delete call.") 
+  bool IsDuplicate( 
+    const MYON_Brep& other, 
+    double tolerance = MYON_ZERO_TOLERANCE 
+    ) const;
+
+  /////////////////////////////////////////////////////////////////
+  // construction/destruction helpers
+
+  // returns Brep to state it has after default construction
+  void Destroy(); 
+
+  // call if memory pool used by b-rep members becomes invalid
+  void EmergencyDestroy(); 
+
+  /*
+  Description:
+    Calculates polygon mesh approximation of the brep
+    and appends one mesh for each face to the mesh_list[]
+    array.
+  Parameters:
+    mp - [in] meshing parameters
+    mesh_list - [out] meshes are appended to this array.
+  Returns:
+    Number of meshes appended to mesh_list[] array.
+  */
+  int CreateMesh( 
+    const MYON_MeshParameters& mp,
+    MYON_SimpleArray<MYON_Mesh*>& mesh_list
+    ) const;
+
+  /*
+  Description:
+    Destroy meshes used to render and analyze brep.
+  Parameters:
+    mesh_type - [in] type of mesh to destroy
+    bDeleteMesh - [in] if true, cached meshes are deleted.
+      If false, pointers to cached meshes are just set to nullptr.
+  See Also:
+    MYON_Brep::GetMesh
+    MYON_BrepFace::DestroyMesh
+    MYON_BrepFace::Mesh
+    MYON_BrepFace::SetMesh
+  */
+  MYON_DEPRECATED_MSG("bDeleteMesh=false is no longer supported") void DestroyMesh( MYON::mesh_type mesh_type, bool bDeleteMesh);
+
+  /*
+  Description:
+    Destroy meshes used to render and analyze brep.
+  Parameters:
+    mesh_type - [in] type of mesh to destroy
+  See Also:
+    MYON_Brep::GetMesh
+    MYON_BrepFace::DestroyMesh
+    MYON_BrepFace::Mesh
+    MYON_BrepFace::SetMesh
+  */
+  void DestroyMesh(MYON::mesh_type mesh_type);
+
+  /*
+  Description:
+    Get cached meshes used to render and analyze brep.
+  Parameters:
+    mesh_type - [in] type of mesh to get
+    meshes - [out] meshes are appended to this array.  The MYON_Brep
+      owns these meshes so they cannot be modified.
+  Returns:
+    Number of meshes added to array. (Same as m_F.Count())
+  See Also:
+    MYON_Brep::DestroyMesh
+    MYON_BrepFace::DestroyMesh
+    MYON_BrepFace::Mesh
+    MYON_BrepFace::SetMesh
+  */
+  int GetMesh( MYON::mesh_type mesh_type, MYON_SimpleArray< const MYON_Mesh* >& meshes ) const;
+
+
+
+  /*
+  Description:
+    Create a brep from a surface.  The resulting surface has an outer
+    boundary made from four trims.  The trims are ordered so that
+    they run along the south, east, north, and then west side of the
+    surface's parameter space.
+  Parameters:
+    pSurface - [in] pointer to a surface.  The brep will manage this
+       pointer and delete it in ~MYON_Brep.
+  Returns:
+    @untitled table
+    true     successful
+      When true is returned, the pSurface pointer is added to the
+      brep's m_S[] array and it will be deleted by the brep's
+      destructor.
+    false
+      brep cannot be created from this surface.
+      When false is returned, then the caller is responsible
+      for deleting pSurface unless it was previously added
+      to the brep's m_S[] array.     
+  Remarks:
+    The surface class must be created with new so that the
+    delete in ~MYON_Brep will not cause a crash.
+  */
+  bool Create( 
+          MYON_Surface*& pSurface
+          );
+
+  bool Create( 
+          MYON_NurbsSurface*& pNurbsSurface
+          );
+
+  bool Create( 
+          MYON_PlaneSurface*& pPlaneSurface
+          );
+
+  bool Create( 
+          MYON_RevSurface*& pRevSurface
+          );
+
+  bool Create( 
+          MYON_SumSurface*& pSumSurface
+          );
+
+  /*
+  Description:
+    Check for corrupt data values that are likely to cause crashes.
+  Parameters:
+    bRepair - [in]
+      If true, const_cast<> will be used to change the corrupt data
+      so that crashes are less likely.
+    bSilentError - [in]
+      If true, MYON_ERROR will not be called when corruption is detected.
+    text_log - [out]
+      If text_log is not null, then a description of corruption 
+      is printed using text_log.
+  Remarks:
+    Ideally, IsCorrupt() would be a virtual function on MYON_Object,
+    but doing that at this point would break the public SDK.
+  */
+  bool IsCorrupt(
+    bool bRepair,
+    bool bSilentError,
+    class MYON_TextLog* text_log
+  ) const;
+
+  bool IsValid( class MYON_TextLog* text_log = nullptr ) const override;
+
+  /*
+  Description:
+    Tests the brep to see if its topology information is
+    valid.
+  Parameters:
+    text_log - [in] if the brep topology is not valid and 
+        text_log is not nullptr, then a brief English 
+        description of the problem is appended to the log.
+        The information appended to text_log is suitable for 
+        low-level debugging purposes by programmers and is 
+        not intended to be useful as a high level user 
+        interface tool.
+  Returns:
+    @untitled table
+    true     brep topology is valid
+    false    brep topology is not valid
+  Remarks:
+    MYON_Brep::IsValidTopology can be called at any time.
+  See Also:
+    MYON_Brep::IsValid
+    MYON_Brep::IsValidGeometry
+    MYON_Brep::IsValidTolerancesAndFlags
+  */
+  bool IsValidTopology( MYON_TextLog* text_log = nullptr ) const;
+
+
+  /*
+  Description:
+    Expert user function that tests the brep to see if its
+    geometry information is valid.  The value of 
+    brep.IsValidTopology() must be true before 
+    brep.IsValidGeometry() can be safely called.
+  Parameters:
+    text_log - [in] if the brep geometry is not valid and 
+        text_log is not nullptr, then a brief English 
+        description of the problem is appended to the log.
+        The information appended to text_log is suitable for 
+        low-level debugging purposes by programmers and is 
+        not intended to be useful as a high level user 
+        interface tool.
+  Returns:
+    @untitled table
+    true     brep geometry is valid
+    false    brep geometry is not valid
+  Remarks:
+    MYON_Brep::IsValidTopology must be true before you can
+    safely call MYON_Brep::IsValidGeometry.
+  See Also:
+    MYON_Brep::IsValid
+    MYON_Brep::IsValidTopology
+    MYON_Brep::IsValidTolerancesAndFlags
+  */
+  bool IsValidGeometry( MYON_TextLog* text_log = nullptr ) const;
+
+  /*
+  Description:
+    Expert user function that tests the brep to see if its
+    tolerances and flags are valid.  The values of 
+    brep.IsValidTopology() and brep.IsValidGeometry() must
+    be true before brep.IsValidTolerancesAndFlags() can 
+    be safely called.
+  Parameters:
+    text_log - [in] if the brep tolerance or flags are not
+        valid and text_log is not nullptr, then a brief English 
+        description of the problem is appended to the log.
+        The information appended to text_log is suitable for 
+        low-level debugging purposes by programmers and is 
+        not intended to be useful as a high level user 
+        interface tool.
+  Returns:
+    @untitled table
+    true     brep tolerance and flags are valid
+    false    brep tolerance and flags are not valid
+  Remarks:
+    MYON_Brep::IsValidTopology and MYON_Brep::IsValidGeometry
+    must be true before you can safely call
+    MYON_Brep::IsValidTolerancesAndFlags.
+  See Also:
+    MYON_Brep::IsValid
+    MYON_Brep::IsValidTopology
+    MYON_Brep::IsValidGeometry
+  */
+  bool IsValidTolerancesAndFlags( MYON_TextLog* text_log = nullptr ) const;
+
+  // Description:
+  //   Tests brep to see if it is valid for 
+  //   saving in V2 3DM archives.
+  // Returns:
+  //   true if brep is valid for V2 3DM archives.
+  // Remarks:
+  //   V2 breps could not have dangling curves.
+  bool IsValidForV2() const;
+  bool IsValidForV2( const MYON_BrepTrim& ) const;
+  bool IsValidForV2( const MYON_BrepEdge& ) const;
+
+
+  // virtual MYON_Objet::Dump() override
+  void Dump( MYON_TextLog& ) const override; // for debugging
+
+  // virtual MYON_Objet::Write() override
+  bool Write( MYON_BinaryArchive& ) const override;
+
+  // virtual MYON_Objet::Read() override
+  bool Read( MYON_BinaryArchive& ) override;
+
+  // virtual MYON_Objet::ObjectType() override
+  MYON::object_type ObjectType() const override;
+
+  // virtual MYON_Geometry::Dimension() override
+  int Dimension() const override;
+
+  // virtual MYON_Geometry::ClearBoundingBox() override
+  void ClearBoundingBox() override;
+
+  // virtual MYON_Geometry GetTightBoundingBox override		
+  bool GetTightBoundingBox( class MYON_BoundingBox& tight_bbox, bool bGrowBox = false, const class MYON_Xform* xform = nullptr ) const override;
+
+  // virtual MYON_Geometry GetBBox override		
+  bool GetBBox( double* boxmin, double* boxmax, bool bGrowBox = false ) const override;
+
+  // virtual MYON_Geometry::Transform() override
+  bool Transform( 
+         const MYON_Xform&
+         ) override;
+
+
+  // virtual MYON_Geometry::SwapCoordinates() override
+  bool SwapCoordinates(
+        int, int        // indices of coordinates to swap
+        ) override;
+
+
+  // virtual MYON_Geometry::HasBrepForm() override
+  bool HasBrepForm() const override; // returns true
+
+  /*
+  Description:
+    If possible, BrepForm() creates a brep form of the
+    MYON_Geometry. 
+  Parameters:
+    brep - [in] if not nullptr, brep is used to store the brep
+        form of the geometry.
+  Result:
+    If brep is not nullptr, then brep = this, otherwise
+    a duplicate of this is returned.
+  Remarks:
+    Override of virtual MYON_Geometry::BrepForm
+  */
+  MYON_Brep* BrepForm( MYON_Brep* brep = nullptr ) const override;
+
+  /////////////////////////////////////////////////////////////////
+  // Creation Interface
+
+  // These add a new geometry piece to the b-rep and return the
+  // index that should be used to reference the geometry.
+  // -1 is returned if the input is not acceptable.
+  // ~MYON_Brep() will delete the geometry.
+  int AddTrimCurve( MYON_Curve* ); // 2d curve used by MYON_BrepTrim
+  int AddEdgeCurve( MYON_Curve* ); // 3d curve used by MYON_BrepEdge
+  int AddSurface( MYON_Surface* ); // 3d surface used by MYON_BrepFace
+
+  // Description:
+  //   Set 3d curve geometry used by a b-rep edge.
+  // Parameters:
+  //   edge - [in]
+  //   c3_index - [in] index of 3d curve in m_C3[] array
+  //   sub_domain - [in] if not nullptr, sub_domain is an increasing
+  //      sub interval of m_C3[c3_index]->Domain().
+  // Returns:
+  //   true if successful.
+  bool SetEdgeCurve( 
+    MYON_BrepEdge& edge,
+    int c3_index,
+    const MYON_Interval* sub_domain = nullptr
+    );
+
+  // Description:
+  //   Set 2d curve geometry used by a b-rep trim.
+  // Parameters:
+  //   trim - [in]
+  //   c2_index - [in] index of 2d curve in m_C2[] array
+  //   sub_domain - [in] if not nullptr, sub_domain is an increasing
+  //      sub interval of m_C2[c2_index]->Domain().
+  // Returns:
+  //   true if successful.
+  bool SetTrimCurve( 
+    MYON_BrepTrim& trim,
+    int c2_index,
+    const MYON_Interval* sub_domain = nullptr
+    );
+
+  // These add a new topology piece to the b-rep and return a 
+  // reference that is intended to be used for initialization.
+  MYON_BrepVertex& NewVertex();
+  MYON_BrepVertex& NewVertex( 
+    MYON_3dPoint vertex_point,
+    double vertex_tolerance = MYON_UNSET_VALUE
+    );
+
+  MYON_BrepEdge& NewEdge(
+                  int = -1              // 3d curve index
+                  );
+  MYON_BrepEdge& NewEdge( 
+                  MYON_BrepVertex&, // start vertex
+                  MYON_BrepVertex&, // end vertex
+                  int = -1,       // 3d curve index
+                  const MYON_Interval* = nullptr, // sub_domain
+                  double edge_tolerance = MYON_UNSET_VALUE
+                  );
+
+  /*
+  Description:
+    Add a new face to a brep.  An incomplete face is added.
+    The caller must create and fill in the loops used by
+    the face.
+  Parameters:
+    si - [in] index of surface in brep's m_S[] array
+  Returns:
+    Reference to new face.
+  Remarks:
+    Adding a new face may grow the dynamic m_F array.  When
+    this happens pointers and references to memory in the
+    previous m_F[] array may become invalid.  Use face indices
+    if this is an issue.
+  Example:
+    See MYON_BrepBox and MYON_BrepSphere source code.
+  See Also:
+    MYON_Brep::AddSurface
+  */
+  MYON_BrepFace& NewFace(
+                  int si = -1
+                  );
+
+  /*
+  Description:
+    Add a new face to a brep.  This creates a complete face with
+    new vertices at the surface corners, new edges along the surface
+    boundary, etc.  The loop of the returned face has four trims that
+    correspond to the south, east, north, and west side of the 
+    surface in that order.  If you use this version of NewFace to
+    add an exiting brep, then you are responsible for using a tool
+    like MYON_Brep::JoinEdges() to hook the new face to its
+    neighbors.
+  Parameters:
+    surface - [in] surface is copied.
+  Returns:
+    Pointer to new face.
+  Remarks:
+    Adding a new face may grow the dynamic arrays used to store
+    vertices, edges, faces, loops, and trims.  When these dynamic
+    arrays are grown, any pointers and references to memory in
+    the previous arrays may become invalid.  Use indices
+    if this is an issue.
+  See Also:
+    MYON_Brep::JoinEdges
+    MYON_Brep::AddSurface
+  */
+  MYON_BrepFace* NewFace( 
+    const MYON_Surface& surface 
+    );
+
+  /*
+  Description:
+    Add a new face to brep.  This version is for expert users.
+  Parameters:
+    pSurface - [in] the returned face will have an outer loop
+                    that goes around the edges of the surface.
+    vid - [in/out] four vertex indices that specify the vertices at
+                   the (sw,se,nw,ne) corners.  If the input value
+                   of a vertex index is -1, then the vertex will be 
+                   created.
+    eid - [in/out] four edge indices that specify the edges for
+                   the (south,east,north,west) sides.  If the input value
+                   of an edge index is -1, then the edge will be created.
+    bRev3d - [in/out] four values of the trim m_bRev3d flags of
+                   the (south,east,north,west) sides.
+  Returns:
+    Pointer to the new face or nullptr if input is not valid.
+    If null is returned, then the caller must delete pSurace
+    unless it was previously added to the brep's m_S[] array.
+  Remarks:
+    Adding a new face may grow the dynamic m_F array.  When
+    this happens pointers and references to memory in the
+    previous m_F[] array may become invalid.  Use face indices
+    if this is an issue.
+  Example:
+    See MYON_BrepBox and MYON_BrepSphere source code.
+  See Also:
+    MYON_Brep::AddSurface
+    MYON_Brep::AddFace( int si )
+    MYON_Brep::Create( MYON_Surface*& )
+  */
+  MYON_BrepFace* NewFace(
+       MYON_Surface* pSurface,
+       int vid[4],
+       int eid[4],
+       bool bRev3d[4]
+       );
+
+  /*
+  Description:
+    Add a new face to the brep whose surface geometry is a 
+    ruled surface between two edges.
+  Parameters:
+    edgeA - [in] The south side of the face's surface will
+          run along edgeA.
+    bRevEdgeA - [in] true if the new face's outer boundary
+          orientation along edgeA is opposite the orientation
+          of edgeA.
+    edgeB - [in] The north side of the face's surface will
+          run along edgeA.
+    bRevEdgeB - [in] true if the new face's outer boundary
+          orientation along edgeB is opposite the orientation
+          of edgeB.
+  Returns:
+    A pointer to the new face or a nullptr if the new face could
+    not be created.
+  */
+  MYON_BrepFace* NewRuledFace(
+        const MYON_BrepEdge& edgeA,
+        bool bRevEdgeA,
+        const MYON_BrepEdge& edgeB, 
+        bool bRevEdgeB
+        );
+
+  /*
+  Description:
+    Add a new face to the brep whose surface geometry is a 
+    ruled cone with the edge as the base and the vertex as
+    the apex point.
+  Parameters:
+    vertex - [in] The apex of the cone will be at this vertex.
+                   The north side of the surface's parameter
+                   space will be a singular point at the vertex.
+    edge - [in] The south side of the face's surface will
+          run along this edge.
+    bRevEdge - [in] true if the new face's outer boundary
+          orientation along the edge is opposite the 
+          orientation of edge.
+  Returns:
+    A pointer to the new face or a nullptr if the new face could
+    not be created.
+  */
+  MYON_BrepFace* NewConeFace(
+        const MYON_BrepVertex& vertex,
+        const MYON_BrepEdge& edge,
+        bool bRevEdge
+        );
+
+  /*
+  Description:
+    Create a new empty boundary loop. The new loop will not be part of a face and 
+    will not include any trim curves.
+  Returns:
+    New boundary loop.
+  */
+  MYON_BrepLoop& NewLoop( MYON_BrepLoop::TYPE );
+
+  /*
+  Description:
+    Create a new boundary loop on a face.  After you get this
+    MYON_BrepLoop, you still need to create the vertices, edges, 
+    and trims that define the loop.
+  Returns:
+    New loop that needs to be filled in.
+  */
+  MYON_BrepLoop& NewLoop( MYON_BrepLoop::TYPE loop_type, MYON_BrepFace& face );
+
+  /*
+  Description:
+    Create a new outer boundary loop that runs along the sides
+    of the face's surface.  All the necessary trims, edges,
+    and vertices are created and added to the brep.
+  Parameters:
+    face_index - [in] index of face that needs an outer boundary
+                      that runs along the sides of its surface.
+  Returns:
+    New outer boundary loop that is complete.
+  */
+  MYON_BrepLoop* NewOuterLoop( int face_index );
+
+  /*
+  Description:
+    Add a new face to brep.  This version is for expert users.
+  Parameters:
+    face_index - [in] index of face that will get a new outer
+                   loop running around the sides of the face's
+                   underlying surface.
+    vid - [in/out] four vertex indices that specify the vertices at
+                   the (sw,se,nw,ne) corners.  If the input value
+                   of a vertex index is -1, then the vertex will be 
+                   created.
+    eid - [in/out] four edge indices that specify the edges for
+                   the (south,east,north,west) sides.  If the input value
+                   of an edge index is -1, then the edge will be created.
+    bRev3d - [in/out] four values of the trim m_bRev3d flags of
+                   the (south,east,north,west) sides.
+  Returns:
+    Pointer to the new loop or nullptr if input is not valid.
+  Remarks:
+    Adding a new loop may grow the dynamic m_L array.  When
+    this happens pointers and references to memory in the
+    previous m_L[] array may become invalid.  Use face indices
+    if this is an issue.
+  See Also:
+    MYON_Brep::NewFace
+  */
+  MYON_BrepLoop* NewOuterLoop(
+         int face_index,
+         int vid[4],
+         int eid[4],
+         bool bRev3d[4]
+         );
+
+  /*
+  Description:
+    Add a planar trimming loop to a planar face.
+  Parameters:
+    face_index - [in] index of planar face.  The underlying
+        surface must be an MYON_PlaneSurface.
+    loop_type - [in] type of loop to add.  If loop_type is
+        MYON_BrepLoop::unknown, then the loop direction is tested
+        and the the new loops type will be set to 
+        MYON_BrepLoop::outer or MYON_BrepLoop::inner.  If the loop_type
+        is MYON_BrepLoop::outer, then the direction of the new loop
+        is tested and flipped if it is clockwise. If the loop_type
+        is MYON_BrepLoop::inner, then the direction of the new loop
+        is tested and flipped if it is counter-clockwise.
+    boundary - [in] a list of 3d curves that form a simple (no self
+        intersections) closed curve.  These curves define the 3d
+        edge geometry and should be near the planar surface.
+    bDuplicateCurves - [in] If true, then duplicates of the curves 
+        in the boundary array are added to the brep.  If false, the
+        curves in the boundary array are added to the brep and will
+        be deleted by MYON_Brep::~MYON_Brep.
+    Returns:
+      true if successful.  The new loop will be brep.m_L.Last().
+  */
+  bool NewPlanarFaceLoop(
+        int face_index,
+        MYON_BrepLoop::TYPE loop_type,
+        MYON_SimpleArray<MYON_Curve*>& boundary,
+        bool bDuplicateCurves = true
+        );
+
+
+  /*
+  Description:
+    Add a new trim that will be part of an inner, outer, or slit loop
+    to the brep.
+  Parameters:
+    c2i - [in] index of 2d trimming curve
+  Returns:
+    new trim
+  Example:
+    int c2i = brep->AddTrimCurve( p2dCurve );
+    MYON_BrepTrim& trim = NewTrim( edge, bRev3d, loop, c2i );
+    trim.m_ei = ...;
+    trim.m_li = ...;
+    trim.m_tolerance[0] = ...;
+    trim.m_tolerance[1] = ...;
+    trim.m_type = ...;
+    trim.m_iso = ...;
+  Remarks:
+    You should set the trim's MYON_BrepTrim::m_tolerance, MYON_BrepTrim::m_type,
+    MYON_BrepTrim::m_iso, MYON_BrepTrim::m_li, and MYON_BrepTrim::m_ei values.
+        In general, you should try to use the
+    MYON_BrepTrim::NewTrim( edge, bRev3d, loop, c2i ) version of NewTrim.
+    If you want to add a singular trim, use MYON_Brep::NewSingularTrim.
+    If you want to add a crvonsrf trim, use MYON_Brep::NewCurveOnFace.
+    If you want to add a ptonsrf trim, use MYON_Brep::NewPointOnFace.
+  See Also:
+    MYON_Brep::SetTrimTypeFlags
+    MYON_Brep::SetTrimIsoFlags
+    MYON_Brep::NewSingularTrim
+    MYON_Brep::NewPointOnFace
+    MYON_Brep::NewCurveOnFace
+  */
+  MYON_BrepTrim& NewTrim(
+                  int c2i = -1
+                  );
+
+  /*
+  Description:
+    Add a new trim that will be part of an inner, outer, or slit loop
+    to the brep.
+  Parameters:
+    bRev3d - [in] MYON_BrepTrim::m_bRev3d value.  true if the
+       edge and trim have opposite directions.
+    loop - [in] trim is appended to this loop
+    c2i - [in] index of 2d trimming curve
+  Returns:
+    new trim
+  Example:
+    int c2i = brep->AddTrimCurve( p2dCurve );
+    MYON_BrepTrim& trim = NewTrim( edge, bRev3d, loop, c2i );
+    trim.m_ei = ...;
+    trim.m_tolerance[0] = ...;
+    trim.m_tolerance[1] = ...;
+    trim.m_type = ...;
+    trim.m_iso = ...;
+  Remarks:
+    You should set the trim's MYON_BrepTrim::m_tolerance, MYON_BrepTrim::m_type,
+    MYON_BrepTrim::m_iso, and MYON_BrepTrim::m_ei values.
+        In general, you should try to use the
+    MYON_BrepTrim::NewTrim( edge, bRev3d, loop, c2i ) version of NewTrim.
+    If you want to add a singular trim, use MYON_Brep::NewSingularTrim.
+    If you want to add a crvonsrf trim, use MYON_Brep::NewCurveOnFace.
+    If you want to add a ptonsrf trim, use MYON_Brep::NewPointOnFace.
+  See Also:
+    MYON_Brep::SetTrimTypeFlags
+    MYON_Brep::SetTrimIsoFlags
+    MYON_Brep::NewSingularTrim
+    MYON_Brep::NewPointOnFace
+    MYON_Brep::NewCurveOnFace
+  */
+  MYON_BrepTrim& NewTrim(
+                  bool bRev3d,
+                  MYON_BrepLoop& loop,
+                  int c2i = -1
+                  );
+
+  /*
+  Description:
+    Add a new trim that will be part of an inner, outer, or slit loop
+    to the brep.
+  Parameters:
+    edge - [in] 3d edge associated with this trim
+    bRev3d - [in] MYON_BrepTrim::m_bRev3d value.  true if the
+       edge and trim have opposite directions.
+    c2i - [in] index of 2d trimming curve
+  Returns:
+    new trim
+  Example:
+    int c2i = brep->AddTrimCurve( p2dCurve );
+    MYON_BrepTrim& trim = NewTrim( edge, bRev3d, c2i );
+    trim.m_li = ...;
+    trim.m_tolerance[0] = ...;
+    trim.m_tolerance[1] = ...;
+    trim.m_type = ...;
+    trim.m_iso = ...;
+  Remarks:
+    You should set the trim's MYON_BrepTrim::m_tolerance, 
+    MYON_BrepTrim::m_type, MYON_BrepTrim::m_iso, 
+    and MYON_BrepTrim::m_li values.
+        In general, you should try to use the
+    MYON_BrepTrim::NewTrim( edge, bRev3d, loop, c2i ) version of NewTrim.
+    If you want to add a singular trim, use MYON_Brep::NewSingularTrim.
+    If you want to add a crvonsrf trim, use MYON_Brep::NewCurveOnFace.
+    If you want to add a ptonsrf trim, use MYON_Brep::NewPointOnFace.
+  See Also:
+    MYON_Brep::SetTrimTypeFlags
+    MYON_Brep::SetTrimIsoFlags
+    MYON_Brep::NewSingularTrim
+    MYON_Brep::NewPointOnFace
+    MYON_Brep::NewCurveOnFace
+  */
+  MYON_BrepTrim& NewTrim(
+                  MYON_BrepEdge& edge,
+                  bool bRev3d,
+                  int c2i = -1
+                  );
+
+  /*
+  Description:
+    Add a new trim that will be part of an inner, outer, or slit loop
+    to the brep.
+  Parameters:
+    edge - [in] 3d edge associated with this trim
+    bRev3d - [in] MYON_BrepTrim::m_bRev3d value.  true if the
+       edge and trim have opposite directions.
+    loop - [in] trim is appended to this loop
+    c2i - [in] index of 2d trimming curve
+  Returns:
+    new trim
+  Example:
+    int c2i = brep->AddTrimCurve( p2dCurve );
+    MYON_BrepTrim& trim = brep->NewTrim( edge, bRev3d, loop, c2i );
+    trim.m_tolerance[0] = ...;
+    trim.m_tolerance[1] = ...;
+  Remarks:
+    You should set the trim's MYON_BrepTrim::m_tolerance values.
+    If c2i is -1, you must set the trim's MYON_BrepTrim::m_iso values.
+    This version of NewTrim sets the trim.m_type value.  If the
+    input edge or loop are not currently valid, then you may
+    need to adjust the trim.m_type value.
+    If you want to add a singular trim, use MYON_Brep::NewSingularTrim.
+    If you want to add a crvonsrf trim, use MYON_Brep::NewCurveOnFace.
+    If you want to add a ptonsrf trim, use MYON_Brep::NewPointOnFace.
+  See Also:
+    MYON_Brep::SetTrimTypeFlags
+    MYON_Brep::SetTrimIsoFlags
+    MYON_Brep::NewSingularTrim
+    MYON_Brep::NewPointOnFace
+    MYON_Brep::NewCurveOnFace
+  */
+  MYON_BrepTrim& NewTrim(
+                  MYON_BrepEdge& edge,
+                  bool bRev3d,
+                  MYON_BrepLoop& loop,
+                  int c2i = -1
+                  );
+
+  /*
+  Description:
+    Add a new singular trim to the brep.
+  Parameters:
+    vertex - [in] vertex along collapsed surface edge
+    loop - [in] trim is appended to this loop
+    iso - [in] one of MYON_Surface::S_iso, MYON_Surface::E_iso, 
+               MYON_Surface::N_iso, or MYON_Surface::W_iso.
+    c2i - [in] index of 2d trimming curve
+  Returns:
+    new trim
+  See Also:
+    MYON_Brep::NewTrim
+  */
+  MYON_BrepTrim& NewSingularTrim(
+                  const MYON_BrepVertex& vertex,
+                  MYON_BrepLoop& loop,
+                  MYON_Surface::ISO iso,
+                  int c2i = -1
+                  );
+
+  /*
+  Description:
+    Adds a new point on face to the brep.
+  Parameters:
+    face - [in] face that vertex lies on
+    s,t - [in] surface parameters
+  Returns:
+    new vertex that represents the point on face.
+  Remarks:
+    If a vertex is a point on a face, then brep.m_E[m_ei]
+    will be an edge with no 3d curve.  This edge will have
+    a single trim with type MYON_BrepTrim::ptonsrf.  There
+    will be a loop containing this single trim.
+  */
+  MYON_BrepVertex& NewPointOnFace( 
+    MYON_BrepFace& face,
+    double s,
+    double t
+    );
+
+  /*
+  Description:
+    Add a new curve on face to the brep.
+  Parameters:
+    face - [in] face that curve lies on
+    edge - [in] 3d edge associated with this curve on surface
+    bRev3d - [in] true if the 3d edge and the 2d parameter space 
+                  curve have opposite directions.
+    c2i - [in] index of 2d curve in face's parameter space
+  Returns:
+    new trim that represents the curve on surface
+  Remarks:
+    You should set the trim's MYON_BrepTrim::m_tolerance and
+    MYON_BrepTrim::m_iso values.
+  */
+  MYON_BrepTrim& NewCurveOnFace(
+                  MYON_BrepFace& face,
+                  MYON_BrepEdge& edge,
+                  bool bRev3d = false,
+                  int c2i = -1
+                  );
+
+  // appends a copy of brep to this and updates
+  // indices of appended brep parts.  Duplicates are not removed.
+  void Append( 
+    const MYON_Brep& // brep
+    ); 
+
+  // This function can be used to compute vertex information for a
+  // b-rep when everything but the m_V array is properly filled in.
+  // It is intended to be used when creating a MYON_Brep from a 
+  // definition that does not include explicit vertex information.
+  void SetVertices(void);
+
+  // This function can be used to set the MYON_BrepTrim::m_iso
+  // flag. It is intended to be used when creating a MYON_Brep from
+  // a definition that does not include compatible parameter space
+  // type information.
+  // See Also: MYON_BrepSetFlagsAndTolerances
+  bool SetTrimIsoFlags();    // sets all trim iso flags
+  bool SetTrimIsoFlags( MYON_BrepFace& );
+  bool SetTrimIsoFlags( MYON_BrepLoop& );
+  bool SetTrimIsoFlags( MYON_BrepTrim& );
+
+
+  /*
+  Description:
+    Calculate the type (singular, mated, boundary, etc.) of
+    an MYON_BrepTrim object.
+  Parameters:
+    trim - [in]
+    bLazy - [in] if true and trim.m_type is set to something other
+       than MYON_BrepTrim::unknown, then no calculation is
+       performed and the value of trim.m_type is returned.
+       If false, the value of trim.m_type is ignored and is calculated.
+  Returns:
+    Type of trim.
+  Remarks:
+    The trim must be connected to a valid loop.
+  See Also:
+    MYON_Brep::SetTrimTypeFlags
+  */
+  MYON_BrepTrim::TYPE TrimType( 
+    const MYON_BrepTrim& trim, 
+    bool bLazy = true
+    ) const;
+
+  // This function can be used to set the MYON_BrepTrim::m_type
+  // flag.  If the optional bLazy argument is true, then only
+  // trims with m_type = unknown are set.
+  // See Also: MYON_BrepSetFlagsAndTolerances
+  bool SetTrimTypeFlags( bool bLazy = false );    // sets all trim iso flags
+  bool SetTrimTypeFlags( MYON_BrepFace&, bool bLazy = false );
+  bool SetTrimTypeFlags( MYON_BrepLoop&, bool bLazy = false );
+  bool SetTrimTypeFlags( MYON_BrepTrim&, bool bLazy = false );
+
+  // GetTrim2dStart() evaluates the start of the
+  // parameter space (2d) trim curve.
+  bool GetTrim2dStart( 
+          int trim_index,         // index of MYON_BrepTrim in m_T[] array
+          MYON_2dPoint& 
+          ) const;
+
+  // GetTrim2dEnd() evaluates end of the
+  // parameter space (2d) trim curve.
+  bool GetTrim2dEnd(
+          int,         // index of MYON_BrepTrim in m_T[] array
+          MYON_2dPoint& 
+          ) const;
+
+  // GetTrim3dStart() evaluates the 3d surface at the start of the
+  // parameter space (2d) trim curve.
+  bool GetTrim3dStart( 
+          int,         // index of MYON_BrepTrim in m_T[] array
+          MYON_3dPoint& 
+          ) const;
+
+  // GetTrim3dEnd() evaluates the 3d surface at the end of the
+  // parameter space (2d) trim curve.
+  bool GetTrim3dEnd(
+          int,         // index of MYON_BrepTrim in m_T[] array
+          MYON_3dPoint& 
+          ) const;
+
+  // This function examines the 2d parameter space curves and returns
+  // the loop's type based on their orientation.  Use this function for
+  // debugging loop orientation problems.
+  MYON_BrepLoop::TYPE ComputeLoopType( const MYON_BrepLoop& ) const;
+
+  // These set the various tolerances.  The optional bool argument
+  // is called bLazy.  If bLazy is false, the tolerance is recomputed
+  // from its definition.  If bLazy is true, the tolerance is computed
+  // only if its current value is negative.
+  bool SetVertexTolerance( MYON_BrepVertex& vertex, bool bLazy = false ) const;
+  virtual
+  bool SetTrimTolerance( MYON_BrepTrim& trim, bool bLazy = false ) const;
+  virtual
+  bool SetEdgeTolerance( MYON_BrepEdge& edge, bool bLazy = false ) const;
+
+  /*
+  Description:
+    Set the brep's vertex tolerances.
+  Parameters:
+    bLazy - [in] if true, only vertex tolerances with the value
+       MYON_UNSET_VALUE will be set.  If false, the vertex tolerance
+       is recomputed from the geometry in the brep.
+  Returns:
+    true if successful.
+  See Also:
+    MYON_Brep::SetVertexTolerance
+    MYON_Brep::SetTrimTolerance
+    MYON_Brep::SetEdgeTolerance
+    MYON_Brep::SetVertexTolerances
+    MYON_Brep::SetTrimTolerances
+    MYON_Brep::SetEdgeTolerances
+    MYON_Brep::SetTolerancesAndFlags
+  */
+  bool SetVertexTolerances( bool bLazy = false );
+
+  /*
+  Description:
+    Set the brep's trim tolerances.
+  Parameters:
+    bLazy - [in] if true, only trim tolerances with the value
+       MYON_UNSET_VALUE will be set.  If false, the trim tolerance
+       is recomputed from the geometry in the brep.
+  Returns:
+    true if successful.
+  See Also:
+    MYON_Brep::SetVertexTolerance
+    MYON_Brep::SetTrimTolerance
+    MYON_Brep::SetEdgeTolerance
+    MYON_Brep::SetVertexTolerances
+    MYON_Brep::SetTrimTolerances
+    MYON_Brep::SetEdgeTolerances
+    MYON_Brep::SetTolerancesAndFlags
+  */
+  bool SetTrimTolerances( bool bLazy = false );
+
+  /*
+  Description:
+    Set the brep's edge tolerances.
+  Parameters:
+    bLazy - [in] if true, only edge tolerances with the value
+       MYON_UNSET_VALUE will be set.  If false, the edge tolerance
+       is recomputed from the geometry in the brep.
+  Returns:
+    true if successful.
+  See Also:
+    MYON_Brep::SetVertexTolerance
+    MYON_Brep::SetTrimTolerance
+    MYON_Brep::SetEdgeTolerance
+    MYON_Brep::SetVertexTolerances
+    MYON_Brep::SetTrimTolerances
+    MYON_Brep::SetEdgeTolerances
+    MYON_Brep::SetTolerancesAndFlags
+  */
+  bool SetEdgeTolerances( bool bLazy = false );
+
+
+  /*
+  Description:
+    Set the trim parameter space bounding box (trim.m_pbox).
+  Parameters:
+    trim - [in]
+    bLazy - [in] if true and trim.m_pbox is valid, then
+       the box is not set.
+  Returns:
+    true if trim ends up with a valid bounding box.
+  */
+  virtual
+  bool SetTrimBoundingBox( MYON_BrepTrim& trim, bool bLazy=false );
+
+  /*
+  Description:
+    Set the loop parameter space bounding box (loop.m_pbox).
+  Parameters:
+    loop - [in]
+    bLazy - [in] if true and loop trim trim.m_pbox is valid, 
+       then that trim.m_pbox is not recalculated.
+  Returns:
+    true if loop ends up with a valid bounding box.
+  */
+  virtual
+  bool SetTrimBoundingBoxes( MYON_BrepLoop& loop, bool bLazy=false );
+
+
+  /*
+  Description:
+    Set the loop and trim parameter space bounding boxes
+    for every loop and trim in the face 
+  Parameters:
+    face - [in]
+    bLazy - [in] if true and trim trim.m_pbox is valid, 
+       then that trim.m_pbox is not recalculated.
+  Returns:
+    true if all the face's loop and trim parameter space bounding 
+    boxes are valid.
+  */
+  virtual
+  bool SetTrimBoundingBoxes( MYON_BrepFace& face, bool bLazy=false );
+
+  /*
+  Description:
+    Set the loop and trim parameter space bounding boxes
+    for every loop and trim in the brep.
+  Parameters:
+    bLazy - [in] if true and trim trim.m_pbox is valid, 
+       then that trim.m_pbox is not recalculated.
+  Returns:
+    true if all the loop and trim parameter space bounding boxes
+    are valid.
+  */
+  virtual
+  bool SetTrimBoundingBoxes( bool bLazy=false );
+
+  /*
+  Description:
+    Set tolerances and flags in a brep
+  Parameters:
+    bLazy - [in] if true, only flags and tolerances that are not
+       set will be calculated.
+    bSetVertexTolerances - [in] true to compute vertex.m_tolerance values
+    bSetEdgeTolerances - [in] true to compute edge.m_tolerance values
+    bSetTrimTolerances - [in] true to compute trim.m_tolerance[0,1] values
+    bSetTrimIsoFlags - [in] true to compute trim.m_iso values
+    bSetTrimTypeFlags - [in] true to compute trim.m_type values
+    bSetLoopTypeFlags - [in] true to compute loop.m_type values
+    bSetTrimBoxes - [in] true to compute trim.m_pbox values
+  See Also:
+    MYON_Brep::SetVertexTolerance
+    MYON_Brep::SetEdgeTolerance
+    MYON_Brep::SetTrimTolerance
+    MYON_Brep::SetTrimTypeFlags
+    MYON_Brep::SetTrimIsoFlags
+    MYON_Brep::ComputeLoopType
+    MYON_Brep::SetTrimBoundingBox
+    MYON_Brep::SetTrimBoundingBoxes
+  */
+  void SetTolerancesBoxesAndFlags(
+       bool bLazy = false,
+       bool bSetVertexTolerances = true,
+       bool bSetEdgeTolerances = true,
+       bool bSetTrimTolerances = true,
+       bool bSetTrimIsoFlags = true,
+       bool bSetTrimTypeFlags = true,
+       bool bSetLoopTypeFlags = true,
+       bool bSetTrimBoxes = true
+       );
+
+
+  /////////////////////////////////////////////////////////////////
+  // Query Interface
+
+  /*
+  Description:
+    Determine how many brep faces reference m_S[surface_index].
+  Parameters:
+    surface_index - [in] index of the surface in m_S[] array
+    max_count - [in] counting stops if max_count > 0 and
+                     at least max_count faces use the surface.
+  Returns:
+    Number of brep faces that reference the surface.
+  */
+  int SurfaceUseCount( 
+              int surface_index,
+              int max_count=0 ) 
+              const;
+  /*
+  Description:
+    Determine how many brep edges reference m_C3[c3_index].
+  Parameters:
+    c3_index - [in] index of the 3d curve in m_C3[] array
+    max_count - [in] counting stops if max_count > 0 and
+                     at least max_count edges use the 3d curve.
+  Returns:
+    Number of brep edges that reference the 3d curve.
+  */
+  int EdgeCurveUseCount( 
+              int c3_index,
+              int max_count=0 ) 
+              const;
+
+  /*
+  Description:
+    Determine how many brep trims reference m_C2[c2_index].
+  Parameters:
+    c2_index - [in] index of the 2d curve in m_C2[] array
+    max_count - [in] counting stops if max_count > 0 and
+                     at least max_count trims use the 2d curve.
+  Returns:
+    Number of brep trims that reference the 2d curve.
+  */
+  int TrimCurveUseCount( 
+              int c2_index,
+              int max_count=0 ) 
+              const;
+
+  /*
+  Description:
+    Get a single 3d curve that traces the entire loop
+  Parameters:
+    loop - [in] loop whose 3d curve should be duplicated
+    bRevCurveIfFaceRevIsTrue - [in] If false, the returned
+       3d curve has an orientation compatible with the
+       2d curve returned by Loop2dCurve().
+       If true and the m_bRev flag of the loop's face
+       is true, then the returned curve is reversed.
+  Returns:
+    A pointer to a 3d MYON_Curve.  The caller must delete
+    this curve.
+  */
+  MYON_Curve* Loop3dCurve( 
+    const MYON_BrepLoop& loop,
+    bool bRevCurveIfFaceRevIsTrue = false
+    ) const;
+
+  /*
+  Description:
+    Get a list of 3d curves that trace the non-seam edge
+    portions of an entire loop
+  Parameters:
+    loop - [in] loop whose 3d curve should be duplicated
+    curve_list - [out] 3d curves are appended to this list
+    bRevCurveIfFaceRevIsTrue - [in] If false, the returned
+       3d curves have an orientation compatible with the
+       2d curve returned by Loop2dCurve().
+       If true and the m_bRev flag of the loop's face
+       is true, then the returned curves are reversed.
+  Returns:
+    Number of curves appended to curve_list.
+  */
+  int Loop3dCurve( 
+    const MYON_BrepLoop& loop,
+    MYON_SimpleArray<MYON_Curve*>& curve_list,
+    bool bRevCurveIfFaceRevIsTrue = false
+    ) const;
+
+
+  /*
+  Description:
+    Get a 3d curve that traces the entire loop
+  Parameters:
+    loop - [in] loop whose 2d curve should be duplicated
+  Returns:
+    A pointer to a 2d MYON_Curve.  The caller must delete
+    this curve.
+  */
+  MYON_Curve* Loop2dCurve( const MYON_BrepLoop& loop ) const;
+
+  /*
+  Description:
+    Determine orientation of a brep.
+  Returns:
+    @untitle table
+    +2     brep is a solid but orientation cannot be computed
+    +1     brep is a solid with outward facing normals
+    -1     brep is a solid with inward facing normals
+     0     brep is not a solid
+  Remarks:
+    The base class implementation returns 2 or 0.  This
+    function is overridden in the Rhino SDK and returns
+    +1, -1, or 0.
+  See Also:
+    MYON_Brep::IsSolid
+  */
+  virtual
+  int SolidOrientation() const;
+
+  /*
+  Description:
+    Test brep to see if it is a solid.  (A "solid" is
+    a closed oriented manifold.)
+  Returns:
+    If the brep is a solid, true is returned. Otherwise false is returned.
+  See Also:
+    MYON_Brep::SolidOrientation
+    MYON_Brep::IsManifold
+  */
+  bool IsSolid() const;
+  
+  /*
+  Description:
+    Test brep to see if it is an oriented manifold.
+  Parameters:
+    pbIsOriented - [in]  if not null, *pbIsOriented is set
+        to true if b-rep is an oriented manifold and false
+        if brep is not an oriented manifold.
+    pbHasBoundary - [in]  if not null, *pbHasBoundary is set
+        to true if b-rep has a boundary edge and false if
+        brep does not have a boundary edge.
+  Returns:
+    If the brep is a manifold, true is returned. Otherwise false is returned.
+  See Also:
+    MYON_Brep::IsSolid
+  */
+  bool IsManifold( // returns true if b-rep is an oriented manifold
+    bool* pbIsOriented = nullptr,
+    bool* pbHasBoundary = nullptr
+    ) const;
+
+
+  /*
+  Description:
+    When an expert is 100% certain of a brep's solid orientation, this function
+    can be used to set the SolidOrientation() property.
+  Parameters:
+    solid_orientation - [in]
+      0: not solid,
+      1: oriented manifold solid (no boundary) with outward facing normals.
+     -1: oriented manifold solid (no boundary) with inward facing normals.
+  */
+  void SetSolidOrientationForExperts(
+    int solid_orientation
+  );
+
+
+  /*
+  Description: 
+    Determine if P is inside Brep.  This question only makes sense
+    when the brep is a closed manifold.  This function does not
+    not check for closed or manifold, so result is not valid in
+    those cases.  Intersects a line through P with brep, finds
+    the intersection point Q closest to P, and looks at face 
+    normal at Q.  If the point Q is on an edge or the intersection
+    is not transverse at Q, then another line is used.
+  Parameters:
+    P - [in] 3d point
+    tolerance - [in] 3d distance tolerance used for intersection
+      and determining strict inclusion.
+    bStrictlInside - [in] If bStrictlInside is true, then this
+      function will return false if the distance from P is within
+      tolerance of a brep face.
+  Returns:
+    True if P is in, false if not. See parameter bStrictlyIn.
+  */
+  bool IsPointInside(
+          MYON_3dPoint P, 
+          double tolerance,
+          bool bStrictlyInside
+          ) const;
+
+
+  bool IsSurface() const;      // returns true if the b-rep has a single face
+                               // and that face is geometrically the same
+                               // as the underlying surface.  I.e., the face
+                               // has trivial trimming.  In this case, the
+                               // surface is m_S[0].
+                               // The flag m_F[0].m_bRev records
+                               // the correspondence between the surface's
+                               // natural parametric orientation and the
+                               // orientation of the b-rep.
+
+
+  bool FaceIsSurface(          // returns true if the face has a single
+         int // index of face  // outer boundary and that boundary runs
+         ) const;              // along the edges of the underlying surface.
+                               // In this case the geometry of the surface
+                               // is the same as the geometry of the face.
+                               // If FaceIsSurface() is true, then
+                               // m_S[m_F[face_index].m_si] is the surface.
+                               // The flag m_F[face_index].m_bRev records
+                               // the correspondence between the surface's
+                               // natural parametric orientation and the
+                               // orientation of face in the b-rep.
+
+  bool LoopIsSurfaceBoundary(  // returns true if the loop's trims all run
+         int // index of loop  // along the edge's of the underlying surface's
+         ) const;              // parameter space.
+
+  /////////////////////////////////////////////////////////////////
+  // Modification Interface
+
+  //////////
+  // Clears all MYON_BrepFace.m_bRev flags by MYON_BrepFace::Transpose
+  // on each face with a true m_bRev.
+  bool FlipReversedSurfaces();
+
+  //////////
+  // Change the domain of a trim's 2d curve.  This changes only the
+  // parameterization of the 2d trimming curve; the locus of the 
+  // 2d trimming curve is not changed.
+  bool SetTrimDomain(
+         int, // index of trim in m_T[] array
+         const MYON_Interval&
+         );
+
+  //////////
+  // Change the domain of an edge.  This changes only the
+  // parameterization of the 3d edge curve; the locus of the 
+  // 3d edge curve is not changed.
+  bool SetEdgeDomain(
+         int, // index of edge in m_E[] array
+         const MYON_Interval&
+         );
+
+  // Reverses entire brep orientation of all faces by toggling 
+  // value of all face's MYON_BrepFace::m_bRev flag.
+  void Flip();
+
+  // reverses orientation of a face by toggling MYON_BrepFace::m_bRev
+  void FlipFace(MYON_BrepFace&);
+
+  // Reverses orientation of trimming loop. 
+  // This function is intended to be used by brep experts and does
+  // does NOT modify MYON_BrepLoop::m_type.  You should make sure 
+  // MYON_BrepLoop::m_type jibes with the loop's direction.  (Outer loops
+  // should be counter-clockwise and inner loops should be clockwise.)
+  // You can use MYON_Brep::LoopDirection() to determine the direction of
+  // a loop.
+  void FlipLoop(MYON_BrepLoop&); // reverses orientation of trimming loop
+
+  // LoopDirection() examines the 2d trimming curve geometry that defines
+  // the loop and returns
+  //
+  //   @untitled table
+  //   +1    the loop is a counter-clockwise loop.
+  //   -1    the loop is a clockwise loop.
+  //    0    the loop is not a continuous closed loop.
+  //
+  // Since LoopDirection() calculates its result based on the 2d trimming
+  // curve geometry, it can be use to set MYON_BrepLoop::m_type to outer/inner
+  // when translating from data definition where this distinction is murky.
+  int LoopDirection( const MYON_BrepLoop& ) const;
+
+
+  /*
+  Description:
+    Sort the face.m_li[] array by loop type 
+    (outer, inner, slit, crvonsrf, ptonsrf)
+  Parameters:
+    face - [in/out] face whose m_li[] array should be sorted.
+  Returns:
+    @untitled table
+    true      success
+    false     failure - no loops or loops with unset loop.m_type
+  See Also:
+    MYON_Brep::ComputeLoopType
+    MYON_Brep::LoopDirection
+  */
+  bool SortFaceLoops( MYON_BrepFace& face ) const;
+
+
+
+  /*
+  Description:
+    Expert user function. 
+    Turn an edge into a series of naked or seam edges.
+    One for each trim at the original edge that comes from a unique face.
+    These edges will share the 3d curve of the original edge. The original edge will
+    still be valid and will have m_ti[0] unchanged.
+    */
+  bool DisconnectEdgeFaces(int eid);
+
+  /*
+  Description:
+    Expert user function.
+  See Also:
+    MYON_Brep::JoinEdges
+  */
+  bool CombineCoincidentVertices(MYON_BrepVertex&, MYON_BrepVertex&); // moves information to first vertex and deletes second
+
+  /*
+  Description:
+    Expert user function.
+  See Also:
+    MYON_Brep::JoinEdges
+  */
+  bool CombineCoincidentEdges(MYON_BrepEdge&, MYON_BrepEdge&); // moves information to first edge and deletes second
+
+  /*
+  Description:
+    Expert user function.
+    Combines contiguous edges into a single edge.  The edges
+    must share a common vertex, then angle between the edge
+    tangents are the common vertex must be less than or
+    equal to angle_tolerance_radians, and any associated
+    trims must be contiguous in there respective boundaries.
+  Parameters;
+    edge_index0 - [in]
+    edge_index1 - [in]
+    angle_tolerance_radians - [in]
+  Returns:
+    Pointer to the new edge or nullptr if the edges cannot
+    be combined into a single edge.
+  Remarks:
+    The input edges are deleted but are still in the
+    brep's m_E[] arrays.  Use MYON_Brep::Compact to remove 
+    the unused edges.
+  */
+  MYON_BrepEdge* CombineContiguousEdges( 
+    int edge_index0, 
+    int edge_iindex1, 
+    double angle_tolerance_radians = MYON_PI/180.0
+    );
+
+
+  // These remove a topology piece from a b-rep but do not
+  // rearrange the arrays that hold the brep objects.  The
+  // deleted objects have their indices set to -1.  Deleting
+  // an object that is connected to other objects will 
+  // modify those objects.
+  void DeleteVertex(MYON_BrepVertex& vertex);
+  void DeleteEdge(MYON_BrepEdge& edge, bool bDeleteEdgeVertices); // pass true to delete vertices used only by edge
+  void DeleteTrim(MYON_BrepTrim& trim, bool bDeleteTrimEdges); // pass true to delete edges and vertices used only by trim
+  void DeleteLoop(MYON_BrepLoop& loop, bool bDeleteLoopEdges); // pass true to delete edges and vertices used only by trim
+  void DeleteFace(MYON_BrepFace& face, bool bDeleteFaceEdges); // pass true to delete edges and vertices used only by face
+  void DeleteSurface(int s_index);
+  void Delete2dCurve(int c2_index);
+  void Delete3dCurve(int c3_index);
+
+  // Description:
+  //   Set m_vertex_user.i, m_edge_user.i, m_face_user.i, m_loop_user.i,
+  //   and m_trim_user.i values of faces of component including 
+  //   m_F[face_index] to label. Numbering starts at 1.
+  // Parameters:
+  //   face_index - [in] index of face in component
+  //   label - [in] value for m_*_user.i
+  // Returns:
+  // Remarks:
+  //   Chases through trim lists of face edges to find adjacent faces.
+  //   Does NOT check for vertex-vertex connections
+  void LabelConnectedComponent(
+    int face_index,
+    int label
+    ) const;
+
+  /*
+  Description:
+    Set  m_vertex_user.i, m_edge_user.i, m_face_user.i, m_loop_user.i,
+    and m_trim_user.i values values to distinguish connected components.
+  Parameters:
+  Returns:
+    number of connected components
+  Remarks:
+    For each face in the i-th component, sets m_face_user.i to i>0.
+    Chases through trim lists of face edges to find adjacent faces.
+	  Numbering starts at 1. Does NOT check for vertex-vertex connections.
+  See Also:
+    MYON_Brep::GetConnectedComponents
+  */
+  int LabelConnectedComponents() const;
+
+  /*
+  Description:
+    If this brep has two or more connected components, 
+    then duplicates of the connected components are appended
+    to the components[] array.
+  Parameters:
+    components - [out] connected components are appended to this array.
+    bDuplicateMeshes - [in] if true, any meshes on this brep are copied
+         to the output breps.
+  Returns:
+    Number of connected components appended to components[] or zero
+    if this brep has only one connected component.
+  See Also:
+    MYON_Brep::GetConnectedComponents
+  */
+  int GetConnectedComponents( 
+          MYON_SimpleArray< MYON_Brep* >& components,
+          bool bDuplicateMeshes
+          ) const;
+
+
+  /*
+  Description:
+    Copy a subset of this brep.
+  Parameters:
+    subfi_count - [in] length of sub_fi[] array.
+    sub_fi - [in] array of face indices in this
+      brep to copy. (If any values inf sub_fi[]
+      are out of range or if sub_fi[] contains
+      duplicates, this function will return null.)
+    sub_brep - [in] if this pointer is not null,
+      then the sub-brep will be created in this
+      class.
+  Returns:
+    If the input is valid, a pointer to the
+    sub-brep is returned.  If the input is not
+    valid, null is returned.  The faces in
+    in the sub-brep's m_F array are in the same
+    order as they were specified in sub_fi[].
+  */
+  MYON_Brep* SubBrep( 
+    int subfi_count, 
+    const int* sub_fi, 
+    MYON_Brep* sub_brep = 0 
+    ) const;
+
+  ///////////////////////////////////////////////////////////////////////
+  //
+  // region topology
+  //
+  bool HasRegionTopology() const;
+
+  /*
+  Description:
+    Get region topology information:
+    In order to keep the MYON_Brep class efficient, rarely used
+    region topology information is not maintained.  If you 
+    require this information, call RegionTopology().
+  */
+  const MYON_BrepRegionTopology& RegionTopology() const;
+
+  /*
+  Description:
+    Destroy region topology information.
+  */
+  void DestroyRegionTopology();
+
+  // Description:
+  //   Duplicate a single brep face.
+  // Parameters:
+  //   face_index - [in] index of face to duplicate
+  //   bDuplicateMeshes - [in] if true, any attached meshes are duplicated
+  // Returns:
+  //   Single face brep.
+  // Remarks:
+  //   The m_vertex_user.i, m_edge_user.i, m_face_user.i, m_loop_user.i,
+  //   and m_trim_user.i values of the returned brep are are set to the 
+  //   indices of the objects they duplicate.
+  // See Also:
+  //   MYON_Brep::DeleteFace, MYON_Brep::ExtractFace
+  MYON_Brep* DuplicateFace(
+    int face_index,
+    bool bDuplicateMeshes
+    ) const;
+
+  // Description:
+  //   Duplicate a a subset of a brep
+  // Parameters:
+  //   face_count - [in] length of face_index[] array
+  //   face_index - [in] array of face indices
+  //   bDuplicateMeshes - [in] if true, any attached meshes are duplicated
+  // Returns:
+  //   A brep made by duplicating the faces listed in the face_index[] array.
+  // Remarks:
+  //   The m_vertex_user.i, m_edge_user.i, m_face_user.i, m_loop_user.i,
+  //   and m_trim_user.i values of the returned brep are are set to the 
+  //   indices of the objects they duplicate.
+  // See Also:
+  //   MYON_Brep::DuplicateFace
+  MYON_Brep* DuplicateFaces(
+    int face_count,
+    const int* face_index,
+    bool bDuplicateMeshes
+    ) const;
+
+  // Description:
+  //   Extract a face from a brep.
+  // Parameters:
+  //   face_index - [in] index of face to extract
+  // Returns:
+  //   Single face brep.
+  // See Also:
+  //   MYON_Brep::DeleteFace, MYON_Brep::DuplicateFace
+  MYON_Brep* ExtractFace(
+    int face_index
+    );
+
+
+  /*
+  Description:
+    Standardizes the relationship between an MYON_BrepEdge
+    and the 3d curve it uses.  When done, the edge will
+    be the only edge that references its 3d curve, the 
+    domains of the edge and 3d curve will be the same, 
+    and the edge will use the entire locus of the 3d curve.
+  Parameters:
+    edge_index - [in] index of edge to standardize.
+    bAdjustEnds - [in] if true, move edge curve endpoints to vertices
+  See Also:
+    MYON_Brep::StandardizeEdgeCurves
+    MYON_Brep::Standardize
+  */
+  bool StandardizeEdgeCurve( int edge_index, bool bAdjustEnds );
+
+
+  /*
+  Description:
+    Expert user only.  Same as above, but to be used when the edge
+    curve use count is known for the edge.
+    Standardizes the relationship between an MYON_BrepEdge
+    and the 3d curve it uses.  When done, the edge will
+    be the only edge that references its 3d curve, the 
+    domains of the edge and 3d curve will be the same, 
+    and the edge will use the entire locus of the 3d curve.
+  Parameters:
+    edge_index - [in] index of edge to standardize.
+    bAdjustEnds - [in] if true, move edge curve endpoints to vertices
+    EdgeCurveUse - [in] if > 1, then the edge curve for this edge is used by more than one
+        edge.  if 1, then the edge curve is used only for this edge. 
+        If <= 0, then use count is unknown.
+  See Also:
+    MYON_Brep::StandardizeEdgeCurves
+    MYON_Brep::Standardize
+  */
+  bool StandardizeEdgeCurve( int edge_index, bool bAdjustEnds, int EdgeCurveUse );
+
+
+  /*
+  Description:
+    Standardize all edges in the brep.
+  Parameters:
+    bAdjustEnds - [in] if true, move edge curve endpoints to vertices
+  See Also:
+    MYON_Brep::StandardizeEdgeCurve
+    MYON_Brep::Standardize
+  */
+  void StandardizeEdgeCurves( bool bAdjustEnds );
+
+  /*
+  Description:
+    Standardizes the relationship between an MYON_BrepTrim
+    and the 2d curve it uses.  When done, the trim will
+    be the only trim that references its 2d curve, the 
+    domains of the trim and 2d curve will be the same, 
+    and the trim will use the entire locus of the 2d curve.
+  Parameters:
+    trim_index - [in] index of trim to standardize.
+  See Also:
+    MYON_Brep::StandardizeTrimCurves
+    MYON_Brep::Standardize
+  */
+  bool StandardizeTrimCurve( int trim_index );
+
+  /*
+  Description:
+    Standardize all trims in the brep.
+  See Also:
+    MYON_Brep::StandardizeTrimCurve
+    MYON_Brep::Standardize
+  */
+  void StandardizeTrimCurves();
+
+  /*
+  Description:
+    Standardizes the relationship between an MYON_BrepFace
+    and the 3d surface it uses.  When done, the face will
+    be the only face that references its 3d surface, and
+    the orientations of the face and 3d surface will be 
+    the same. 
+  Parameters:
+    face_index - [in] index of face to standardize.
+  See Also:
+    MYON_Brep::StardardizeFaceSurfaces
+    MYON_Brep::Standardize
+  */
+  bool StandardizeFaceSurface( int face_index );
+
+  /*
+  Description:
+    Standardize all faces in the brep.
+  See Also:
+    MYON_Brep::StandardizeFaceSurface
+    MYON_Brep::Standardize
+  */
+  void StandardizeFaceSurfaces();
+
+  /*
+  Description:
+    Standardize all trims, edges, and faces in the brep.
+  Remarks:
+    After standardizing, there may be unused curves and surfaces
+    in the brep.  Call MYON_Brep::Compact to remove these unused
+    curves and surfaces.
+  See Also:
+    MYON_Brep::StandardizeTrimCurves
+    MYON_Brep::StandardizeEdgeCurves
+    MYON_Brep::StandardizeFaceSurface
+    MYON_Brep::Compact
+  */
+  void Standardize();
+  
+
+  /*
+  Description:
+    Sometimes the MYON_Surface used by a face extends far
+    beyond the face's outer boundary.  ShrinkSurface uses
+    MYON_Surface::Trim to remove portions of the surface that
+    extend beyond the face's outer boundary loop.
+  Parameters:
+    face - [in] face to test and whose surface should be shrunk.
+    DisableSide - [in] This is a bit field.  A set bit indicates not to shrink
+                the surface on a given side.  The default of 0 enables shrinking 
+                on all four sides.
+      @table  
+      value       meaning
+      0x0001     Don't shrink on the west side of domain.
+      0x0002     Don't shrink on the south side of domain.
+      0x0004     Don't shrink on the east side of domain.
+      0x0008     Don't shrink on the north side of domain.
+  Returns:
+    @untitled table
+    true        successful
+    false       failure
+  Remarks:
+    If a surface needs to be shrunk it is copied.  After shrinking,
+    you may want to call MYON_Brep::CullUnusedSurfaces to remove
+    any unused surfaces.
+  See Also:
+    MYON_Brep::ShrinkSurfaces
+    MYON_Brep::CullUnusedSurfaces
+  */
+  bool ShrinkSurface( MYON_BrepFace& face, int DisableSide=0 );
+
+  /*
+  Description:
+    Sometimes the MYON_Surface used by a face extends far
+    beyond the face's outer boundary.  ShrinkSurfaces calls
+    MYON_Shrink::ShrinkSurface on each face to remove portions
+    of surfaces that extend beyond their face's outer boundary
+    loop.
+  Returns:
+    @untitled table
+    true        successful
+    false       failure
+  Remarks:
+    If a surface needs to be shrunk it is copied.  After shrinking,
+    you may want to call MYON_Brep::CullUnusedSurfaces to remove
+    any unused surfaces.
+  See Also:
+    MYON_Brep::ShrinkSurface
+    MYON_Brep::CullUnusedSurfaces
+  */
+  bool ShrinkSurfaces();
+
+  /*
+  Description:
+    Uses the CullUnused*() members to delete any unreferenced
+    objects from arrays, reindexes as needed, and shrinks
+    arrays to minimum required size.
+  See Also:
+    MYON_Brep::CullUnusedFaces
+    MYON_Brep::CullUnusedLoops
+    MYON_Brep::CullUnusedTrims
+    MYON_Brep::CullUnusedEdges
+    MYON_Brep::CullUnusedVertices
+    MYON_Brep::CullUnused3dCurves
+    MYON_Brep::CullUnused2dCurves
+    MYON_Brep::CullUnusedSurfaces
+  */
+  bool Compact();
+
+  bool CullUnusedFaces(); // culls faces with m_face_index == -1
+  bool CullUnusedLoops(); // culls loops with m_loop_index == -1
+  bool CullUnusedTrims(); // culls trims with m_trim_index == -1
+  bool CullUnusedEdges(); // culls edges with m_edge_index == -1
+  bool CullUnusedVertices(); // culls vertices with m_vertex_index == -1
+  bool CullUnused3dCurves(); // culls 2d curves not referenced by a trim
+  bool CullUnused2dCurves(); // culls 3d curves not referenced by an edge
+  bool CullUnusedSurfaces(); // culls surfaces not referenced by a face
+
+  /////////////////////////////////////////////////////////////////
+  // Navigation Interface
+
+  // for moving around loops - returns trim index of previous/next trim in loop
+  int PrevTrim(
+        int // index of current trim (m_trim_index)
+        ) const;
+  int NextTrim(
+        int // index of current trim (m_trim_index)
+        ) const;
+
+  //Same as NextTrim and PrevTrim, but skips over trims with type singular
+  int PrevNonsingularTrim(
+        int // index of current trim (m_trim_index)
+        ) const;
+  int NextNonsingularTrim(
+        int // index of current trim (m_trim_index)
+        ) const;
+
+  /*
+  Description:
+    This is a simple tool for getting running through the edges
+    that begin and end at a vertex.
+  Parameters:
+    current_edge_index - [in]
+    endi - [in] 0 = use the edge start vertex, 1 = use the edge end vertex
+    prev_endi - [out] 0 if previous edge begins at the vertex, 
+                      1 if previous edge ends at the vertex
+  Returns:
+    edge index of the previous edge or -1 if there is only one edge
+    that begins or ends at the vertex.
+  Remarks:
+    This is a tool that simplifies searching through the
+    MYON_BrepVertex.m_ei[] array.
+    The edges are in no particular order.
+  See Also:
+    MYON_Brep::NextEdge
+  */
+  int PrevEdge(
+        int current_edge_index,
+        int endi,
+        int* prev_endi = nullptr
+        ) const;
+
+  /*
+  Description:
+    This is a simple tool for getting running through the edges
+    that begin and end at a vertex.
+  Parameters:
+    current_edge_index - [in]
+    endi - [in] 0 = use the edge start vertex, 1 = use the edge end vertex
+    next_endi - [out] 0 if next edge begins at the vertex, 
+                      1 if next edge ends at the vertex
+  Returns:
+    edge index of the next edge or -1 if there is only one edge
+    that begins or ends at the vertex.
+  Remarks:
+    This is a tool that simplifies searching through the
+    MYON_BrepVertex.m_ei[] array.  
+    The edges are in no particular order.
+  See Also:
+    MYON_Brep::NextEdge
+  */
+  int NextEdge(
+        int current_edge_index,
+        int endi,
+        int* next_endi = nullptr
+        ) const;
+
+  /*
+  Description:
+    Get a brep component from its index.
+  Parameters:
+    component_index - [in] 
+  Returns:
+    A const pointer to the component.  Do not delete
+    the returned object.  It points to an object managed
+    by this brep.
+  See Also:
+    MYON_Brep::Face
+    MYON_Brep::Edge
+    MYON_Brep::Loop
+    MYON_Brep::Trim
+    MYON_Brep::Vertex
+  */
+  const MYON_Geometry* BrepComponent( 
+    MYON_COMPONENT_INDEX ci
+    ) const;
+
+  /*
+  Description:
+    Get vertex from trim index or component index.
+  Parameters:
+    vertex_index - [in] either an index into m_V[] or a component index
+                      of type brep_vertex.
+  Returns:
+    If the index is a valid vertex index or a valid vertex component
+    index, then a pointer to the MYON_BrepVertex is returned.  Otherwise
+    nullptr is returned.
+  See Also
+    MYON_Brep::Component( const MYON_BrepVertex& )
+  */
+  MYON_BrepVertex* Vertex( int vertex_index ) const;
+  MYON_BrepVertex* Vertex( MYON_COMPONENT_INDEX vertex_index ) const;
+
+  /*
+  Description:
+    Get edge from edge index or component index.
+  Parameters:
+    edge_index - [in] either an index into m_E[] or a component index
+                      of type brep_edge.
+  Returns:
+    If the index is a valid edge index or a valid edge component
+    index, then a pointer to the MYON_BrepEdge is returned.  Otherwise
+    nullptr is returned.
+  See Also
+    MYON_Brep::Component( const MYON_BrepEdge& )
+  */
+  MYON_BrepEdge* Edge( int edge_index ) const;
+  MYON_BrepEdge* Edge( MYON_COMPONENT_INDEX edge_index ) const;
+
+  /*
+  Description:
+    Get trim from trim index or component index.
+  Parameters:
+    trim_index - [in] either an index into m_T[] or a component index
+                      of type brep_trim.
+  Returns:
+    If the index is a valid trim index or a valid trim component
+    index, then a pointer to the MYON_BrepTrim is returned.  Otherwise
+    nullptr is returned.
+  See Also
+    MYON_Brep::Component( const MYON_BrepTrim& )
+  */
+  MYON_BrepTrim* Trim( int trim_index ) const;
+  MYON_BrepTrim* Trim( MYON_COMPONENT_INDEX trim_index ) const;
+
+  /*
+  Description:
+    Get loop from loop index or component index.
+  Parameters:
+    loop_index - [in] either an index into m_L[] or a component index
+                      of type brep_loop.
+  Returns:
+    If the index is a valid loop index or a valid loop component
+    index, then a pointer to the MYON_BrepLoop is returned.  Otherwise
+    nullptr is returned.
+  See Also
+    MYON_Brep::Component( const MYON_BrepLoop& )
+  */
+  MYON_BrepLoop* Loop( int loop_index ) const;
+  MYON_BrepLoop* Loop( MYON_COMPONENT_INDEX loop_index ) const;
+
+  /*
+  Description:
+    Get face from face index or component index.
+  Parameters:
+    face_index - [in] either an index into m_F[] or a component index
+                      of type brep_face.
+  Returns:
+    If the index is a valid face index or a valid face component
+    index, then a pointer to the MYON_BrepFace is returned.  Otherwise
+    nullptr is returned.
+  See Also
+    MYON_Brep::Component( const MYON_BrepFace& )
+  */
+  MYON_BrepFace* Face( int face_index ) const;
+  MYON_BrepFace* Face( MYON_COMPONENT_INDEX face_index ) const;
+
+  //Match endpoints of adjacent trims. If a trim needs to be adjusted, copy the 2d curve if necessary,
+  //convert to NURBS form, yank cvs.  Compact() should be called afterwards. Returns false if error in
+  //computation,  Trims must be from same face and meet at a common vertex.
+  //These are expert user functions. When in doubt use MatchTrimEnds() on the entire Brep.
+  
+  /*
+  Description:
+    Match the end of a trim to the start of the next trim.
+  Parameters:
+    T0 - [in] brep trim
+    T1 - [in] brep trim that comes immediately after T0 in the same loop
+  Returns:
+    true if either trim's 2d curve is changed
+    */
+  bool MatchTrimEnds(MYON_BrepTrim& T0,
+                           MYON_BrepTrim& T1 
+                           );
+
+  /*
+  Description:
+    Match the endpoints of a trim to the next and previous trim
+  Parameters:
+    trim_index - [in] index into m_T
+  Returns:
+    true if any trim's 2d curve is changed
+    */
+  bool MatchTrimEnds(int trim_index);
+
+  /*
+  Description:
+    Match the endpoints of all trims in a loop
+  Parameters:
+    Loop - [in] brep loop
+  Returns:
+    true if any trim's 2d curve is changed
+    */
+  bool MatchTrimEnds(MYON_BrepLoop& Loop);
+
+  /*
+  Description:
+    Match the endpoints of all trims in a brep
+  Parameters:
+  Returns:
+    true if any trim's 2d curve is changed
+    */
+  bool MatchTrimEnds();
+
+  /*
+  Description:
+    Convert the 2d curve of a trim to an MYON_NurbsCurve
+  Parameters:
+    T - [in] brep trim
+  Returns:
+    Pointer to m_C2[T.m_c2i]
+  NOTE: After calling this, m_C2[T.m_c2i] will be a NURBS curve only referenced by 
+    T, with domain = T.m_t.  Caller should not delete the returned curve since its memory is owned
+    by the brep (this).
+  */
+  MYON_NurbsCurve* MakeTrimCurveNurb(MYON_BrepTrim& T);
+
+  /*
+  Description:
+    Check for slit trims and slit boundaries in each face.
+  Returns:
+    true if any slits were found
+  */
+  bool HasSlits() const;
+
+  /*
+  Description:
+    Check for slit trims and slit boundaries in a face.
+  Returns:
+    true if any slits were found
+  */
+  bool HasSlits(const MYON_BrepFace& F) const;
+
+  /*
+  Description:
+    Check for slit trims in a loop.
+  Returns:
+    true if any slits were found
+  */
+  bool HasSlits(const MYON_BrepLoop& L) const;
+
+  /*
+  Description:
+    remove slit trims and slit boundaries from each face.
+  Returns:
+    true if any slits were removed
+  Remarks:
+    Caller should call Compact() afterwards.
+  */
+  bool RemoveSlits();
+
+  /*
+  Description:
+    remove slit trims and slit boundaries from a face.
+  Parameters:
+    F - [in] brep face
+  Returns:
+    true if any slits were removed
+  Remarks:
+    Caller should call Compact() when done.
+  */
+  bool RemoveSlits(MYON_BrepFace& F);
+
+  /*
+  Description:
+    remove slit trims from a loop.
+  Parameters:
+    L - [in] brep loop
+  Returns:
+    true if any slits were removed
+  Remarks:
+    Caller should call Compact() when done.
+    If all trims are removed, the loop will be marked as deleted.
+  */
+  bool RemoveSlits(MYON_BrepLoop& L);
+
+  /*
+  Description:
+    If fid0 != fid1 and m_F[fid0] and m_F[fid1] have the same surface (m_si is identical),
+    and they are joined along a set of edges that do not have any other faces, then this will
+    combine the two faces into one.
+  Parameters:
+    fid0, fid1 - [in] indices into m_F of faces to be merged.
+  Returns:
+    id of merged face if faces were successfully merged. -1 if not merged.
+  Remarks:
+    Caller should call Compact() when done.
+  */
+  int MergeFaces(int fid0, int fid1);
+
+  /*
+  Description:
+    Merge all possible faces that have the same m_si
+  Returns:
+    true if any faces were successfully merged.
+  Remarks:
+    Caller should call Compact() when done.
+  */
+  bool MergeFaces();
+
+  /*
+  Description:
+    Removes nested polycurves from the m_C2[] and m_C3[] arrays.
+  Parameters:
+    bExtractSingleSegments - [in] if true, polycurves with a
+      single segment are replaced with the segment curve.
+    bEdges - [in] if true, the m_C3[] array is processed
+    bTrimCurves - [in] if true, the m_C2[] array is processed.  
+  Returns:
+    True if any nesting was removed and false if no nesting
+    was removed.
+  */
+  bool RemoveNesting(
+          bool bExtractSingleSegments,
+          bool bEdges = true, 
+          bool bTrimCurves = true
+          );
+
+  /*
+  Description:
+    Expert user tool to collapse a "short" edge to a vertex.
+    The edge is removed and the topology is repaired
+    so that everything that used to connect to the edge
+    connects the specified vertex.
+  Parameters:
+    edge_index - [in] index of edge to remove
+    bCloseTrimGap - [in] if true and the removal of the
+       edge creates a gap in the parameter space trimming
+       loop, then the 2d trim curves will be adjusted to
+       close the gap.
+    vertex_index - [in] if >= 0, this the edge is collapsed
+       to this vertex.  Otherwise a vertex is automatically
+       selected or created.
+  Returns:
+    True if edge was successfully collapsed.
+  Remarks:
+    After you finish cleaning up the brep, you need
+    to call MYON_Brep::Compact() to remove unused edge,
+    trim, and vertex information from the brep's m_E[], 
+    m_V[], m_T[], m_C2[], and m_C3[] arrays.
+  */
+  bool CollapseEdge(
+    int edge_index,
+    bool bCloseTrimGap = true,
+    int vertex_index = -1
+    );
+
+  /*
+  Description:
+    Expert user tool to move trims and edges from
+    one vertex to another.
+  Parameters:
+    old_vi - [in] index of old vertex
+    new_vi - [in] index of new vertex
+    bClearTolerances - [in] if true, then tolerances of
+       edges and trims that are connected to the old
+       vertex are set to MYON_UNSET_VALUE.
+    vertex_index - [in] if >= 0, this the edge is collapsed
+       to this vertex.  Otherwise a vertex is automatically
+       selected or created.
+  Returns:
+    True if successful.
+  Remarks:
+    After you finish cleaning up the brep, you need
+    to call MYON_Brep::Compact() to remove unused edge,
+    trim, and vertex information from the brep's m_E[], 
+    m_V[], m_T[], m_C2[], and m_C3[] arrays.
+  */
+  bool ChangeVertex( 
+    int old_vi, 
+    int new_vi, 
+    bool bClearTolerances 
+    );
+
+  /*
+  Description:
+    Expert user tool to remove any gap between adjacent trims.
+  Parameters:
+    trim0 - [in]
+    trim1 - [in]
+  Returns:
+    True if successful.
+  Remarks:
+    The trims must be in the same trimming loop.  The vertex
+    at the end of trim0 must be the same as the vertex at
+    the start of trim1.  The trim's m_iso and m_type flags
+    need to be correctly set.
+  */
+  bool CloseTrimGap( 
+    MYON_BrepTrim& trim0, 
+    MYON_BrepTrim& trim1 
+    );
+
+  /*
+  Description:
+    Remove edges that are not connected to a face.
+  Parameters:
+    bDeleteVertices - [in] if true, then the vertices
+      at the ends of the wire edges are deleted if 
+      they are not connected to face trimming edges.
+  Returns:
+    Number of edges that were removed.
+  Remarks:
+    After you finish cleaning up the brep, you need
+    to call MYON_Brep::Compact() to remove unused edge,
+    trim, and vertex information from the brep's m_E[], 
+    m_V[], m_T[], m_C2[], and m_C3[] arrays.
+
+    After you finish cleaning up the brep, you need
+    to call MYON_Brep::Compact() to remove deleted vertices
+    from the m_V[] array.
+  See Also:
+    MYON_Brep::RemoveWireVertices
+  */
+  int RemoveWireEdges( bool bDeleteVertices = true );
+
+  /*
+  Description:
+    Remove vertices that are not connected to an edge.
+  Returns:
+    Number of vertices that were deleted.
+  Remarks:
+    After you finish cleaning up the brep, you need
+    to call MYON_Brep::Compact() to remove deleted 
+    vertices from the m_V[] array.
+  See Also:
+    MYON_Brep::RemoveWireEdges
+  */
+  int RemoveWireVertices();
+
+
+public:
+  /*
+  Description:
+    Removes all per face material channel index overrides.
+  Returns:
+    Number of changed faces.
+  Remarks:
+    Per face material channel indices are a mutable property on MYON_BrepFace and are set with MYON_BrepFace.SetMaterialChannelIndex().
+  */
+  unsigned int ClearPerFaceMaterialChannelIndices();
+
+  /*
+  Returns:
+    True if one or more faces have per face material channel index overrides.
+  Remarks:
+    Per face material channel indices are a mutable property on MYON_BrepFace and are set with MYON_BrepFace.SetMaterialChannelIndex().
+  */
+  bool HasPerFaceMaterialChannelIndices() const;
+
+  /*
+  Description:
+    Removes all per face color overrides.
+  Returns:
+    Number of changed faces.
+  Remarks:
+    Per face colors are a mutable property on MYON_BrepFace and are set with MYON_BrepFace.SetPerFaceColor().
+  */
+  unsigned int ClearPerFaceColors() const;
+
+  /*
+  Returns:
+    True if one or more faces have per face color overrides.
+  Remarks:
+    Per face colors are a mutable property on MYON_BrepFace and are set with MYON_BrepFace.SetPerFaceColor().
+  */
+  bool HasPerFaceColors() const;
+
+  /////////////////////////////////////////////////////////////////
+  // "Expert" Interface
+
+  void Set_user(MYON_U u) const; // set every brep m_*_user value to u
+  void Clear_vertex_user_i() const; // zero all brep's m_vertex_user values
+  void Clear_edge_user_i(int) const;   // zero all brep's m_edge_user values
+  void Clear_edge_user_i() const;   // zero all brep's m_edge_user values
+  void Clear_trim_user_i() const;   // zero all brep's m_trim_user values
+  void Clear_loop_user_i() const;   // zero all brep's m_loop_user values
+  void Clear_face_user_i() const;   // zero all brep's m_face_user values
+  void Clear_user_i() const;        // zero all brep's m_*_user values
+
+  // Union available for application use.
+  // The constructor zeros m_brep_user.
+  // The value is of m_brep_user is not saved in 3DM
+  // archives and may be changed by some computations.
+  mutable MYON_U m_brep_user; 
+
+  // geometry 
+  // (all geometry is deleted by ~MYON_Brep().  Pointers can be nullptr
+  // or not referenced.  Use Compact() to remove unreferenced geometry.
+  MYON_CurveArray   m_C2;  // Pointers to parameter space trimming curves
+                         // (used by trims).
+  MYON_CurveArray   m_C3;  // Pointers to 3d curves (used by edges).
+  MYON_SurfaceArray m_S;   // Pointers to parametric surfaces (used by faces)
+
+  // topology
+  // (all topology is deleted by ~MYON_Brep().  Objects can be unreferenced.
+  // Use Compact() to to remove unreferenced geometry.
+  MYON_BrepVertexArray  m_V;   // vertices
+  MYON_BrepEdgeArray    m_E;   // edges
+  MYON_BrepTrimArray    m_T;   // trims
+  MYON_BrepLoopArray    m_L;   // loops
+  MYON_BrepFaceArray    m_F;   // faces
+
+protected:	
+  friend class MYON_BrepFace;
+  friend class MYON_BrepRegion;
+  friend class MYON_BrepFaceSide;
+  friend class MYON_V5_BrepRegionTopologyUserData;
+  MYON_BoundingBox m_bbox;
+  mutable class MYON_BrepRegionTopology* m_region_topology = nullptr;
+  static class MYON_BrepRegionTopology* Internal_RegionTopologyPointer(
+    const MYON_Brep* brep,
+    bool bValidateFaceCount 
+    );
+  void Internal_AttachV5RegionTopologyAsUserData(
+    MYON_BinaryArchive& archive
+  ) const;
+
+
+  // m_aggregate_status "should" be an MYON_AggregateComponentStatusEx,
+  // but that change requires breaking the C++ SDK.
+  mutable MYON_AggregateComponentStatus m_aggregate_status;
+
+  // Never directly set m_is_solid, use calls to IsSolid() and/or 
+  // SolidOrientation() when you need to know the answer to this
+  // question.
+  // 0 = unset
+  // 1 = solid with normals pointing out
+  // 2 = solid with normals pointing in
+  // 3 = not solid
+  int m_is_solid = 0;
+
+public:
+  // Not ideal - used in debugging and testing
+  //bool GetLock();
+  //bool GetLockOrReturnFalse();
+  //bool ReturnLock();
+
+private:
+  // In calculations where multiple threads are using a brep and calling functions
+  // that may modify content, the calling code can use use MYON_SleepLockGuard guard(Mutex)
+  // or similar techniques to make the calculations thread safe.
+  // Because Mutex is a public resource, it must be used with great care to
+  // prevent lock contention.
+  friend class MYON_SleepLockGuard;
+  mutable MYON_SleepLock m_sleep_lock;
+  
+protected:
+  // These are friends so legacy tol values stored in v1 3dm files
+  // can be used to set brep edge and trimming tolerances with a call
+  // to MYON_Brep::SetTolsFromLegacyValues().
+  friend bool MYON_BinaryArchive::ReadV1_TCODE_LEGACY_FAC(MYON_Object**,MYON_3dmObjectAttributes*);
+  friend bool MYON_BinaryArchive::ReadV1_TCODE_LEGACY_SHL(MYON_Object**,MYON_3dmObjectAttributes*);
+  void Initialize();
+
+  // helpers to set MYON_BrepTrim::m_iso flag
+  void SetTrimIsoFlag(int,double[6]);
+  void SetTrimIsoFlag(int);
+
+  // helpers to create and set vertices
+  bool SetEdgeVertex(const int, const int, const int );
+  bool HopAcrossEdge( int&, int& ) const;
+  bool SetTrimStartVertex( const int, const int);
+  void SetLoopVertices(const int);
+  void ClearTrimVertices();
+  void ClearEdgeVertices();
+
+  // helpers for SwapFaceParameters()
+  bool SwapLoopParameters(
+        int // index of loop
+        );
+  bool SwapTrimParameters(
+        int // index of trim
+        );
+
+  // helpers for validation checking
+  bool IsValidTrim(int trim_index,MYON_TextLog* text_log) const;
+  bool IsValidTrimTopology(int trim_index,MYON_TextLog* text_log) const;
+  bool IsValidTrimGeometry(int trim_index,MYON_TextLog* text_log) const;
+  bool IsValidTrimTolerancesAndFlags(int trim_index,MYON_TextLog* text_log) const;
+
+  bool IsValidLoop(int loop_index,MYON_TextLog* text_log) const;
+  bool IsValidLoopTopology(int loop_index,MYON_TextLog* text_log) const;
+  bool IsValidLoopGeometry(int loop_index,MYON_TextLog* text_log) const;
+  bool IsValidLoopTolerancesAndFlags(int loop_index,MYON_TextLog* text_log) const;
+
+  bool IsValidFace(int face_index,MYON_TextLog* text_log) const;
+  bool IsValidFaceTopology(int face_index,MYON_TextLog* text_log) const;
+  bool IsValidFaceGeometry(int face_index,MYON_TextLog* text_log) const;
+  bool IsValidFaceTolerancesAndFlags(int face_index,MYON_TextLog* text_log) const;
+  
+  bool IsValidEdge(int edge_index,MYON_TextLog* text_log) const;
+  bool IsValidEdgeTopology(int edge_index,MYON_TextLog* text_log) const;
+  bool IsValidEdgeGeometry(int edge_index,MYON_TextLog* text_log) const;
+  bool IsValidEdgeTolerancesAndFlags(int edge_index,MYON_TextLog* text_log) const;
+
+  bool IsValidVertex(int vertex_index,MYON_TextLog* text_log) const;
+  bool IsValidVertexTopology(int vertex_index,MYON_TextLog* text_log) const;
+  bool IsValidVertexGeometry(int vertex_index,MYON_TextLog* text_log) const;
+  bool IsValidVertexTolerancesAndFlags(int vertex_index,MYON_TextLog* text_log) const;
+
+  void SetTolsFromLegacyValues();
+
+  // read helpers to support various versions
+  bool ReadOld100( MYON_BinaryArchive& ); // reads legacy old RhinoIO toolkit b-rep
+  bool ReadOld101( MYON_BinaryArchive& ); // reads legacy Rhino 1.1 b-rep
+  bool ReadOld200( MYON_BinaryArchive&, int ); // reads legacy trimmed surface
+  MYON_Curve* Read100_BrepCurve( MYON_BinaryArchive& ) const;
+  MYON_Surface* Read100_BrepSurface( MYON_BinaryArchive& ) const;
+
+  // helpers for reading legacy v1 trimmed surfaces and breps
+  bool ReadV1_LegacyTrimStuff( MYON_BinaryArchive&, MYON_BrepFace&, MYON_BrepLoop& );
+  bool ReadV1_LegacyTrim( MYON_BinaryArchive&, MYON_BrepFace&, MYON_BrepLoop& );
+  bool ReadV1_LegacyLoopStuff( MYON_BinaryArchive&, MYON_BrepFace& );
+  bool ReadV1_LegacyLoop( MYON_BinaryArchive&, MYON_BrepFace& );
+  bool ReadV1_LegacyFaceStuff( MYON_BinaryArchive& );
+  bool ReadV1_LegacyShellStuff( MYON_BinaryArchive& );
+
+  
+
+public:
+  // The MYON_Brep code increments MYON_Brep::ErrorCount every time something
+  // unexpected happens. This is useful for debugging.
+  static unsigned int ErrorCount;
+
+private:
+  /*
+  Parameters:
+    bLazy - [in]
+      If true and if MYON_BrepFace.m_bbox is not empty, then MYON_BrepFace.m_bbox is returned.
+      In all other cases the bbox is calculated from scratch.
+    bUpdateCachedBBox - [in]
+      If true and the bounding box is calculated, then the value is saved in MYON_BrepFace.m_bbox
+      so future lazy evaluations can use the value.
+  */
+  const MYON_BoundingBox InternalBrepBoundingBox(bool bLazy, bool bUpdateCachedBBox) const;
+};
+
+///////////////////////////////////////////////////////////////////////////////
+//
+// brep construction tools
+// 
+
+/*
+Description:
+  Create a brep representation of a mesh.
+Parameters:
+  mesh_topology - [in]
+  bTrimmedTriangles - [in] if true, triangles in the mesh
+     will be represented by trimmed planes in the brep.
+     If false, triangles in the mesh will be represented by
+     untrimmed singular bilinear NURBS surfaces in the brep.
+  pBrep - [in] If not nullptr, this the mesh representation will
+     be put into this brep.
+Example:
+
+          MYON_Mesh mesh = ...;
+          MYON_Brep* pBrep = MYON_BrepFromMesh( mesh.Topology() );
+          ...
+          delete pBrep;
+
+See Also
+  MYON_BrepFromMesh( const MYON_Mesh& mesh, ... );
+*/
+MYON_DECL
+MYON_Brep* MYON_BrepFromMesh( 
+          const MYON_MeshTopology& mesh_topology, 
+          bool bTrimmedTriangles = true,
+          MYON_Brep* pBrep = nullptr 
+          );
+
+/*
+Description:
+  Create a brep representation of a mesh.
+Parameters:
+  mesh_topology - [in]
+  bTrimmedTriangles - [in] if true, triangles in the mesh
+     will be represented by trimmed planes in the brep.
+     If false, triangles in the mesh will be represented by
+     untrimmed singular bilinear NURBS surfaces in the brep.
+  bUseNgonsIfTheyExist - [in] if the mesh has ngons and bUseNgonsIfTheyExist is true
+     then trimmed planes will be created for the ngons regardless of bTrimmedTriangles.
+  tolerance - [in] used to determine if an ngon is planar.
+  pBrep - [in] If not nullptr, this the mesh representation will
+     be put into this brep.
+Example:
+
+          MYON_Mesh mesh = ...;
+          MYON_Brep* pBrep = MYON_BrepFromMesh( mesh.Topology() );
+          ...
+          delete pBrep;
+
+See Also
+  MYON_BrepFromMesh( const MYON_Mesh& mesh, ... );
+*/
+MYON_DECL
+MYON_Brep* MYON_BrepFromMeshWithNgons(
+  const MYON_MeshTopology& mesh_topology,
+  bool bTrimmedTriangles,
+  bool bUseNgonsIfTheyExist,
+  double tolerance,
+  MYON_Brep * pBrep = nullptr
+  );
+
+/*
+Description:
+  Get an MYON_Brep definition of a box.
+Parameters:
+  box_corners - [in] 8 points defining the box corners
+     arranged as the vN labels indicate.
+
+          v7_______e6_____v6
+           |\             |\
+           | e7           | e5
+           |  \ ______e4_____\ 
+          e11  v4         |   v5
+           |   |        e10   |
+           |   |          |   |
+          v3---|---e2----v2   e9
+           \   e8         \   |
+            e3 |           e1 |
+             \ |            \ |
+              \v0_____e0_____\v1
+
+  pBrep - [in] if not nullptr, this brep will be used and
+               returned.
+Returns:
+  An MYON_Brep representation of the box with topology
+
+   edge              vertices
+    m_E[ 0]           m_V[0], m_V[1]
+    m_E[ 1]           m_V[1], m_V[2]
+    m_E[ 2]           m_V[2], m_V[3]
+    m_E[ 3]           m_V[3], m_V[0]
+    m_E[ 4]           m_V[4], m_V[5]
+    m_E[ 5]           m_V[5], m_V[6]
+    m_E[ 6]           m_V[6], m_V[7]
+    m_E[ 7]           m_V[7], m_V[4]
+    m_E[ 8]           m_V[0], m_V[4]
+    m_E[ 9]           m_V[1], m_V[5]
+    m_E[10]           m_V[2], m_V[6]
+    m_E[11]           m_V[3], m_V[7]
+
+   face              boundary edges
+    m_F[0]            +m_E[0] +m_E[9]  -m_E[4] -m_E[8]
+    m_F[1]            +m_E[1] +m_E[10] -m_E[5] -m_E[9]
+    m_F[2]            +m_E[2] +m_E[11] -m_E[6] -m_E[10]
+    m_F[3]            +m_E[3] +m_E[8]  -m_E[7] -m_E[11]
+    m_F[4]            -m_E[3] -m_E[2]  -m_E[1] -m_E[0]
+//     m_F[5]            +m_E[4] +m_E[5]  +m_E[6] +m_E[7]
+*/
+MYON_DECL
+MYON_Brep* MYON_BrepBox( const MYON_3dPoint* box_corners, MYON_Brep* pBrep = nullptr );
+
+/*
+Description:
+  Get an MYON_Brep definition of a wedge.
+Parameters:
+  corners - [in] 6 points defining the box corners
+     arranged as the vN labels indicate.
+
+                     /v5    
+                    /|\       
+                   / | \     
+                  e5 |  e4   
+                 /   e8  \     
+                /__e3_____\  
+              v3|    |    |v4     
+                |    |    |       
+                |    /v2  |   
+                e6  / \   e7   
+                |  /   \  |   
+                | e2    e1|   
+                |/       \|     
+                /____e0___\  
+              v0           v1
+
+  pBrep - [in] if not nullptr, this brep will be used and
+               returned.
+Returns:
+  An MYON_Brep representation of the wedge with topology
+
+  edge              vertices
+    m_E[ 0]           m_V[0], m_V[1]
+    m_E[ 1]           m_V[1], m_V[2]
+    m_E[ 2]           m_V[2], m_V[0]
+    m_E[ 3]           m_V[3], m_V[4]
+    m_E[ 4]           m_V[4], m_V[5]
+    m_E[ 5]           m_V[5], m_V[0]
+    m_E[ 6]           m_V[0], m_V[3]
+    m_E[ 7]           m_V[1], m_V[4]
+    m_E[ 8]           m_V[2], m_V[5]
+
+  face              boundary edges
+    m_F[0]            +m_E[0] +m_E[7]  -m_E[3] -m_E[6]
+    m_F[1]            +m_E[1] +m_E[8]  -m_E[4] -m_E[7]
+    m_F[2]            +m_E[2] +m_E[6]  -m_E[5] -m_E[8]
+    m_F[3]            +m_E[3] +m_E[8]  -m_E[7] -m_E[11]
+    m_F[4]            -m_E[2]  -m_E[1] -m_E[0]
+    m_F[5]            +m_E[3] +m_E[4]  +m_E[5]
+*/
+MYON_DECL
+MYON_Brep* MYON_BrepWedge( const MYON_3dPoint* corners, MYON_Brep* pBrep = nullptr );
+
+/*
+Description:
+  Get an MYON_Brep definition of a sphere.
+Parameters:
+  sphere - [in]
+  pBrep - [in] if not nullptr, this brep will be used and
+               returned.
+Returns:
+  An MYON_Brep representation of the sphere with a single face,
+  a single edge along the seam, and vertices at the north
+  and south poles.
+*/
+MYON_DECL
+MYON_Brep* MYON_BrepSphere( const MYON_Sphere& sphere, MYON_Brep* pBrep = nullptr );
+
+/*
+Description:
+  Get an MYON_Brep definition of a sphere.
+Parameters:
+  Center - [in] Center of sphere
+  radius - [int] Radius of sphere
+  pBrep - [in] if not nullptr, this brep will be used and
+               returned.
+Returns:
+  An MYON_Brep representation of the sphere with six similar faces,
+  each an untrimmed rational quadratic surface
+*/
+MYON_DECL
+MYON_Brep* MYON_BrepQuadSphere( const MYON_3dPoint& Center, double radius, MYON_Brep* pBrep = nullptr );
+
+/*
+Description:
+  Get an MYON_Brep definition of a torus.
+Parameters:
+  torus - [in]
+  pBrep - [in] if not nullptr, this brep will be used and
+               returned.
+Returns:
+  An MYON_Brep representation of the torus with a single face
+  a two edges along the seams.
+*/
+MYON_DECL
+MYON_Brep* MYON_BrepTorus( const MYON_Torus& torus, MYON_Brep* pBrep = nullptr );
+
+/*
+Description:
+  Get an MYON_Brep definition of a cylinder.
+Parameters:
+  cylinder - [in] cylinder.IsFinite() must be true
+  bCapBottom - [in] if true end at cylinder.m_height[0] should be capped
+  bCapTop - [in] if true end at cylinder.m_height[1] should be capped
+  pBrep - [in] if not nullptr, this brep will be used and
+               returned.
+Returns:
+  An MYON_Brep representation of the cylinder with a single
+  face for the cylinder, an edge along the cylinder seam, 
+  and vertices at the bottom and top ends of this seam edge.
+  The optional bottom/top caps are single faces with one
+  circular edge starting and ending at the bottom/top vertex.
+*/
+MYON_DECL
+MYON_Brep* MYON_BrepCylinder( const MYON_Cylinder& cylinder, 
+                          bool bCapBottom,
+                          bool bCapTop,
+                          MYON_Brep* pBrep = nullptr );
+
+/*
+Description:
+  Get an MYON_Brep definition of a cone.
+Parameters:
+  cylinder - [in] cylinder.IsFinite() must be true
+  bCapBase - [in] if true the base of the cone should be capped.
+  pBrep - [in] if not nullptr, this brep will be used and
+               returned.
+Returns:
+  An MYON_Brep representation of the cone with a single
+  face for the cone, an edge along the cone seam, 
+  and vertices at the base and apex ends of this seam edge.
+  The optional cap is a single face with one circular edge 
+  starting and ending at the base vertex.
+*/
+MYON_DECL
+MYON_Brep* MYON_BrepCone( 
+          const MYON_Cone& cone, 
+          bool bCapBottom,
+          MYON_Brep* pBrep = nullptr 
+          );
+
+/*
+Description:
+  Get an MYON_Brep form of a surface of revolution.
+Parameters:
+  pRevSurface - [in] pointer to a surface of revolution.
+     The brep will manage this pointer and delete it in ~MYON_Brep.
+  bCapStart - [in] if true, the start of the revolute is
+     not on the axis of revolution, and the surface of revolution
+     is closed, then a circular cap will be added to close
+     of the hole at the start of the revolute.
+  bCapEnd - [in] if true, the end of the revolute is
+     not on the axis of revolution, and the surface of revolution
+     is closed, then a circular cap will be added to close
+     of the hole at the end of the revolute.
+  pBrep - [in] if not nullptr, this brep will be used and
+               returned.
+Returns:
+  @untitled table
+  true     successful
+  false    brep cannot be created from this surface.
+Remarks:
+  The surface class must be created with new because
+  it will be destroyed with the delete operator
+  in ~MYON_Brep.
+*/
+MYON_DECL
+MYON_Brep* MYON_BrepRevSurface( 
+          MYON_RevSurface*& pRevSurface,
+          bool bCapStart,
+          bool bCapEnd,
+          MYON_Brep* pBrep = nullptr 
+          );
+
+
+          
+/*
+Description:
+  Create an MYON_Brep trimmed plane.
+Parameters:
+  plane - [in] plane that will be trimmed.
+  boundary - [in] a simple (no self intersections) closed
+      curve that defines the outer boundary of the trimmed
+      plane.  This curve is copied for use in the brep.
+  pBrep - [in] if not nullptr, this brep will be used and returned.
+Returns:
+  An MYON_Brep representation of the trimmed plane with a single face.
+See Also:
+  MYON_Brep::NewPlanarFaceLoop()
+*/
+MYON_DECL
+MYON_Brep* MYON_BrepTrimmedPlane( 
+            const MYON_Plane& plane, 
+            const MYON_Curve& boundary,
+            MYON_Brep* pBrep = nullptr );
+
+/*
+Description:
+  Get an MYON_Brep definition of a trimmed plane.
+Parameters:
+  plane - [in] plane that will be trimmed.
+  boundary - [in] a list of 3d curves that form a simple 
+      (no self intersections) closed curve that defines the
+      outer boundary of the trimmed plane.
+  bDuplicateCurves - [in] if true, duplicates of the
+       curves in the boundary array are used in the brep.  If false
+       the curves in the boundary array are used in the brep
+       and the brep's destructor will delete the curves.
+  pBrep - [in] if not nullptr, this brep will be used and
+               returned.
+Returns:
+  An MYON_Brep representation of the trimmed plane with a single face.
+See Also:
+  MYON_Brep::NewPlanarFaceLoop()
+*/
+MYON_DECL
+MYON_Brep* MYON_BrepTrimmedPlane( 
+            const MYON_Plane& plane, 
+            MYON_SimpleArray<MYON_Curve*>& boundary,
+            bool bDuplicateCurves = true,
+            MYON_Brep* pBrep = nullptr );
+
+
+/*
+Description:
+  Extrude a brep
+Parameters:
+  brep - [in/out]
+  path_curve - [in] path to extrude along.
+  bCap - [in] if true, the extrusion is capped with a translation
+              of the input brep.
+Returns:
+  True if successful.
+See Also:
+  MYON_BrepExtrudeFace
+  MYON_BrepExtrudeLoop
+  MYON_BrepExtrudeEdge
+  MYON_BrepExtrudeVertex
+  MYON_BrepConeFace
+  MYON_BrepConeLoop
+  MYON_BrepConeEdge
+Remarks:
+  The new faces are appended to brep.m_F[]. It is the caller's
+  responsibility to insure the result does not self intersect.
+*/
+MYON_DECL
+bool MYON_BrepExtrude( 
+          MYON_Brep& brep,
+          const MYON_Curve& path_curve,
+          bool bCap = true
+          );
+
+/*
+Description:
+  Extrude a face in a brep.
+Parameters:
+  brep - [in/out]
+  face_index - [in] index of face to extrude.
+  path_curve - [in] path to extrude along.
+  bCap - [in] if true, the extrusion is capped with a translation
+              of the face being extruded.
+Example:
+  Extrude a face along a vector.
+
+          MYON_Brep brep = ...;
+          int face_index = ...;
+          MYON_3dVector v = ...;
+          MYON_LineCurve line_curve( MYON_Line( MYON_3dPoint::Origin, vector ) );
+          MYON_BrepExtrudeFace( brep, face_index, line_curve, true );
+
+Returns:
+  @untitled table
+  0    failure
+  1    successful - no cap added
+  2    successful - cap added as last face
+See Also:
+  MYON_BrepExtrude
+  MYON_BrepExtrudeLoop
+  MYON_BrepExtrudeEdge
+  MYON_BrepExtrudeVertex
+  MYON_BrepConeFace
+  MYON_BrepConeLoop
+  MYON_BrepConeEdge
+Remarks:
+  The new faces are appended to brep.m_F[].  If a cap is requested
+  it is the last face in the returned brep.m_F[]
+*/
+MYON_DECL
+int MYON_BrepExtrudeFace( 
+          MYON_Brep& brep,
+          int face_index,
+          const MYON_Curve& path_curve,
+          bool bCap = true
+          );
+
+/*
+Description:
+  Extrude a loop in a brep.
+Parameters:
+  brep - [in/out]
+  loop_index - [in] index of face to extrude.
+  path_curve - [in] path to extrude along.
+  bCap - [in] if true and the loop is closed, the extrusion
+              is capped.
+Returns:
+  @untitled table
+  0    failure
+  1    successful - no cap added
+  2    successful - cap added as last face
+See Also:
+  MYON_BrepExtrude
+  MYON_BrepExtrudeFace
+  MYON_BrepExtrudeEdge
+  MYON_BrepExtrudeVertex
+  MYON_BrepConeFace
+  MYON_BrepConeLoop
+  MYON_BrepConeEdge
+Remarks:
+  The new faces are appended to brep.m_F[].  If a cap is requested
+  it is the last face in the returned brep.m_F[]
+*/
+MYON_DECL
+int MYON_BrepExtrudeLoop( 
+          MYON_Brep& brep,
+          int loop_index,
+          const MYON_Curve& path_curve,
+          bool bCap = true
+          );
+
+/*
+Description:
+  Extrude an edge in a brep.
+Parameters:
+  brep - [in/out]
+  edge_index - [in] index of face to extrude.
+  path_curve - [in] path to extrude along.
+Returns:
+  @untitled table
+  0    failure
+  1    successful
+See Also:
+  MYON_BrepExtrude
+  MYON_BrepExtrudeFace
+  MYON_BrepExtrudeLoop
+  MYON_BrepExtrudeVertex
+  MYON_BrepConeFace
+  MYON_BrepConeLoop
+  MYON_BrepConeEdge
+Remarks:
+  The new face is appended to brep.m_F[].
+*/
+MYON_DECL
+int MYON_BrepExtrudeEdge( 
+          MYON_Brep& brep,
+          int edge_index,
+          const MYON_Curve& path_curve
+          );
+
+
+/*
+Description:
+  Extrude a vertex in a brep.
+Parameters:
+  brep - [in/out]
+  vertex_index - [in] index of vertex to extrude.
+  path_curve - [in] path to extrude along.
+Returns:
+  @untitled table
+  0    failure
+  1    successful
+See Also:
+  MYON_BrepExtrude
+  MYON_BrepExtrudeFace
+  MYON_BrepExtrudeLoop
+  MYON_BrepExtrudeEdge
+  MYON_BrepConeFace
+  MYON_BrepConeLoop
+  MYON_BrepConeEdge
+Remarks:
+  The new vertex is appended to brep.m_V[] and
+  the new edge is appended to brep.m_E[].
+*/
+MYON_DECL
+int MYON_BrepExtrudeVertex( 
+          MYON_Brep& brep,
+          int vertex_index,
+          const MYON_Curve& path_curve
+          );
+
+
+/*
+Description:
+  Cone a face in a brep.
+Parameters:
+  brep - [in/out]
+  face_index - [in] index of face to extrude.
+  apex_point - [in] apex of cone.
+Returns:
+  @untitled table
+  0    failure
+  1    successful
+See Also:
+  MYON_BrepExtrudeFace
+  MYON_BrepExtrudeLoop
+  MYON_BrepExtrudeEdge
+  MYON_BrepExtrudeVertex
+  MYON_BrepConeFace
+  MYON_BrepConeLoop
+  MYON_BrepConeEdge
+Remarks:
+  The new faces are appended to brep.m_F[].
+*/
+MYON_DECL
+int MYON_BrepConeFace( 
+          MYON_Brep& brep,
+          int face_index,
+          MYON_3dPoint apex_point
+          );
+
+/*
+Description:
+  Cone a loop in a brep.
+Parameters:
+  brep - [in/out]
+  loop_index - [in] index of face to extrude.
+  apex_point - [in] apex of cone.
+Returns:
+  @untitled table
+  0    failure
+  1    successful
+See Also:
+  MYON_BrepExtrudeFace
+  MYON_BrepExtrudeLoop
+  MYON_BrepExtrudeEdge
+  MYON_BrepExtrudeVertex
+  MYON_BrepConeFace
+  MYON_BrepConeLoop
+  MYON_BrepConeEdge
+Remarks:
+  The new faces are appended to brep.m_F[].
+*/
+MYON_DECL
+bool MYON_BrepConeLoop( 
+          MYON_Brep& brep,
+          int loop_index,
+          MYON_3dPoint apex_point
+          );
+
+/*
+Description:
+  Cone an edge in a brep.
+Parameters:
+  brep - [in/out]
+  edge_index - [in] index of face to extrude.
+  apex_point - [in] apex of cone.
+Returns:
+  @untitled table
+  0    failure
+  1    successful
+See Also:
+  MYON_BrepExtrudeFace
+  MYON_BrepExtrudeLoop
+  MYON_BrepExtrudeEdge
+  MYON_BrepExtrudeVertex
+  MYON_BrepConeFace
+  MYON_BrepConeLoop
+  MYON_BrepConeEdge
+Remarks:
+  The new face is appended to brep.m_F[].
+*/
+MYON_DECL
+int MYON_BrepConeEdge( 
+          MYON_Brep& brep,
+          int edge_index,
+          MYON_3dPoint apex_point
+          );
+
+//These merge adjacent faces that have the same underlying surface.
+MYON_DECL
+int MYON_BrepMergeFaces(MYON_Brep& B, int fid0, int fid1);
+
+MYON_DECL
+bool MYON_BrepMergeFaces(MYON_Brep& B);
+
+//This removes all slit trims  from F that are not joined to another face.
+//Unlike MYON_Brep::RemoveSlits(), this will remove slit pairs from a loop in cases 
+//that will result in the creation of more loops. Caller is responsible for calling 
+//MYON_Brep::Compact() to get rid of deleted trims and loops.
+
+MYON_DECL
+bool MYON_BrepRemoveSlits(MYON_BrepFace& F);
+
+//Merges all possible edges
+MYON_DECL
+void MYON_BrepMergeAllEdges(MYON_Brep& B);
+
+/*
+Description:
+  Merges two breps into a single brep.  The
+  result may be non-manifold or have multiple
+  connected components.
+Parameters:
+  brep0 - [in]
+  brep1 - [in]
+  tolerance - [in]
+Returns:
+  Merged brep or nullptr if calculation failed.
+*/
+MYON_DECL
+MYON_Brep* MYON_MergeBreps(
+          const MYON_Brep& brep0,
+          const MYON_Brep& brep1,
+          double tolerance
+          );
+
+/*
+Description:
+  Very low level utility.  Order edges around a vertex.
+Parameters:
+  B - [in]
+  vid - [in]
+  trim_ends - [out] trim_ends[a].i is a trim index, trim_ends[a].j is 0 for start or 1 for end.
+                    The nth is B.m_T[trim_ends[n].i].Edge(). If bClosed is false, then the first and last edges will be naked.
+  bClosed - [out] If true, then all edges at the vertex have exactly two trims
+Returns:
+  True if the order can be found.  If any edge at the vertex is non-manifold, or if more than two are naked, then false.
+*/
+MYON_DECL
+bool MYON_OrderEdgesAroundVertex(const MYON_Brep& B, int vid,
+                               MYON_SimpleArray<MYON_2dex>& trim_ends, 
+                               bool& bClosed);
+
+
+/*
+Description:
+Very low level utility.  Order edges around a vertex.
+Parameters:
+B - [in]
+vid - [in]
+trim_ends - [out] trim_ends[a].i is a trim index, trim_ends[a].j is 0 for start or 1 for end.
+The nth is B.m_T[trim_ends[n].i].Edge(). If bClosed is false, then the first and last edges will be naked.
+Must have at least as many MYON2dex as the vertex has edges.
+bClosed - [out] If true, then all edges at the vertex have exactly two trims
+Returns:
+True if the order can be found.  If any edge at the vertex is non-manifold, or if more than two are naked, then false.
+NOTE: If you don't know how many edges are at the vertex, call the version that takes an MYON_SimpleArray.
+*/
+MYON_DECL
+bool MYON_OrderEdgesAroundVertex(const MYON_Brep& B, int vid,
+  MYON_2dex* trim_ends,//Must be at as big as the edge count at the vertex
+  bool& bClosed);
+
+
+
+
+
+
+#if defined(MYON_COMPILING_OPENNURBS)
+//////////////////////////////////////////////////////////////////////////
+//
+// MYON_BrepIncrementErrorCount()
+//
+//  Appears in places where the code traps error conditions.
+//  Putting a breakpoint on the line indicated below is an easy way
+//  to have the debugger break on all error conditions and inspect
+//  the first place something goes wrong in a complex calculation.
+//
+void MYON_BrepIncrementErrorCount();  // defined in opennurbs_error.cpp
+#define MYON_BREP_ERROR(msg) (MYON_BrepIncrementErrorCount(), MYON_ERROR(msg))
+#define MYON_BREP_RETURN_ERROR(rc) (MYON_BrepIncrementErrorCount(), rc)
+#define MYON_BREP_RETURN_ERROR_MSG(msg, rc) \
+  (MYON_BrepIncrementErrorCount(), MYON_ERROR(msg), rc)
+#endif
+
+#endif
